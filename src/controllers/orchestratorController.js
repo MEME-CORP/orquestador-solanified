@@ -312,7 +312,7 @@ class OrchestratorController {
           }
 
           // Generate random distribution (2-3 wallets get funds, sum = 0.99 SOL to leave some for fees)
-          const distributions = this.generateRandomDistribution(childWallets.length, 0.99);
+          const distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
           
           const childTransfers = [];
           for (let i = 0; i < childWallets.length; i++) {
@@ -809,7 +809,7 @@ class OrchestratorController {
    * @param {number} totalAmount - Total amount to distribute
    * @returns {Array<number>} Array of amounts for each wallet
    */
-  generateRandomDistribution(walletCount, totalAmount) {
+  static generateRandomDistribution(walletCount, totalAmount) {
     const distributions = new Array(walletCount).fill(0);
     
     // Randomly select 2-3 wallets to receive funds
