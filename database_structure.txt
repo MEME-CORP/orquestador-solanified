@@ -1,0 +1,301 @@
+-- =========================================================
+-- Crypto Wallets DB (PostgreSQL)
+-- Derivations maintained via triggers:
+--   mother_wallets.is_available
+--   assigned_mother_wallets.child_balance_{sol,spl}
+--   bundlers.total_balance_{sol,spl}
+-- =========================================================
+
+-- Optional: run everything atomically
+BEGIN;
+
+-- ---------- Types & helpers ----------
+-- Consistent high-precision numeric type for token balances (SOL uses 9 decimals)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'money9') THEN
+    CREATE DOMAIN money9 AS NUMERIC(38,9)
+      CHECK (VALUE >= 0);
+  END IF;
+END$$;
+
+-- ---------- Core tables ----------
+
+CREATE TABLE IF NOT EXISTS users (
+  id                 BIGSERIAL UNIQUE,
+  user_wallet_id     TEXT PRIMARY KEY,
+  in_app_private_key TEXT NOT NULL,
+  in_app_public_key  TEXT NOT NULL,
+  balance_sol        money9 NOT NULL DEFAULT 0,
+  balance_spl        money9 NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS mother_wallets (
+  id            BIGSERIAL PRIMARY KEY,
+  private_key   TEXT NOT NULL,
+  public_key    TEXT NOT NULL UNIQUE,
+  balance_sol   money9 NOT NULL DEFAULT 0,
+  is_available  BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS child_wallets (
+  private_key       TEXT PRIMARY KEY,
+  public_key        TEXT NOT NULL UNIQUE,
+  mother_wallet_id  BIGINT NOT NULL REFERENCES mother_wallets(id) ON DELETE CASCADE,
+  balance_sol       money9 NOT NULL DEFAULT 0,
+  balance_spl       money9 NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_child_wallets_mw ON child_wallets(mother_wallet_id);
+
+CREATE TABLE IF NOT EXISTS bundlers (
+  id                 BIGSERIAL PRIMARY KEY,
+  user_wallet_id     TEXT NOT NULL REFERENCES users(user_wallet_id) ON DELETE RESTRICT,
+  total_balance_sol  money9 NOT NULL DEFAULT 0,
+  total_balance_spl  money9 NOT NULL DEFAULT 0,
+  token_name         TEXT,
+  is_active          BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS idx_bundlers_user_wallet ON bundlers(user_wallet_id);
+
+CREATE TABLE IF NOT EXISTS assigned_mother_wallets (
+  mother_wallet_id   BIGINT NOT NULL REFERENCES mother_wallets(id) ON DELETE CASCADE,
+  bundler_id         BIGINT NOT NULL REFERENCES bundlers(id) ON DELETE CASCADE,
+  child_balance_sol  money9 NOT NULL DEFAULT 0,
+  child_balance_spl  money9 NOT NULL DEFAULT 0,
+  PRIMARY KEY (mother_wallet_id, bundler_id)
+);
+CREATE INDEX IF NOT EXISTS idx_amw_bundler ON assigned_mother_wallets(bundler_id);
+CREATE INDEX IF NOT EXISTS idx_amw_mother  ON assigned_mother_wallets(mother_wallet_id);
+
+CREATE TABLE IF NOT EXISTS tokens (
+  id               BIGSERIAL PRIMARY KEY,
+  name             TEXT NOT NULL,
+  symbol           TEXT NOT NULL,
+  description      TEXT,
+  image_url        TEXT,
+  twitter          TEXT,
+  telegram         TEXT,
+  website          TEXT,
+  dev_buy_amount   money9 NOT NULL DEFAULT 0,
+  contract_address TEXT UNIQUE,
+  user_wallet_id TEXT NOT NULL REFERENCES users(user_wallet_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tokens_symbol ON tokens(symbol);
+
+-- ---------- Utility functions (idempotent) ----------
+
+-- Recompute is_available for one mother wallet:
+CREATE OR REPLACE FUNCTION update_mother_wallet_availability(p_mother_id BIGINT)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+  UPDATE mother_wallets m
+     SET is_available = NOT EXISTS (
+       SELECT 1
+         FROM assigned_mother_wallets amw
+         JOIN bundlers b ON b.id = amw.bundler_id
+        WHERE amw.mother_wallet_id = m.id
+          AND b.is_active = TRUE
+     )
+   WHERE m.id = p_mother_id;
+$$;
+
+-- Recompute the child aggregate balances for all assignments of one mother wallet:
+CREATE OR REPLACE FUNCTION refresh_amw_child_balances(p_mother_id BIGINT)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+  WITH sums AS (
+    SELECT
+      COALESCE(SUM(c.balance_sol), 0)::money9 AS s_sol,
+      COALESCE(SUM(c.balance_spl), 0)::money9 AS s_spl
+    FROM child_wallets c
+    WHERE c.mother_wallet_id = p_mother_id
+  )
+  UPDATE assigned_mother_wallets amw
+     SET child_balance_sol = sums.s_sol,
+         child_balance_spl = sums.s_spl
+    FROM sums
+   WHERE amw.mother_wallet_id = p_mother_id;
+$$;
+
+-- Recompute bundler totals:
+CREATE OR REPLACE FUNCTION refresh_bundler_totals(p_bundler_id BIGINT)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+  WITH sums AS (
+    SELECT
+      COALESCE(SUM(child_balance_sol), 0)::money9 AS s_sol,
+      COALESCE(SUM(child_balance_spl), 0)::money9 AS s_spl
+    FROM assigned_mother_wallets
+    WHERE bundler_id = p_bundler_id
+  )
+  UPDATE bundlers b
+     SET total_balance_sol = sums.s_sol,
+         total_balance_spl = sums.s_spl
+    FROM sums
+   WHERE b.id = p_bundler_id;
+$$;
+
+-- ---------- Triggers ----------
+
+-- (A) BEFORE INSERT/UPDATE on assigned_mother_wallets:
+--     set the child_balance_* columns to current sums for that mother wallet.
+CREATE OR REPLACE FUNCTION trg_amw_set_child_balances()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_sol money9;
+  v_spl money9;
+BEGIN
+  SELECT COALESCE(SUM(balance_sol), 0)::money9,
+         COALESCE(SUM(balance_spl), 0)::money9
+    INTO v_sol, v_spl
+  FROM child_wallets
+  WHERE mother_wallet_id = NEW.mother_wallet_id;
+
+  NEW.child_balance_sol := v_sol;
+  NEW.child_balance_spl := v_spl;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS amw_set_child_balances ON assigned_mother_wallets;
+CREATE TRIGGER amw_set_child_balances
+BEFORE INSERT OR UPDATE OF mother_wallet_id
+ON assigned_mother_wallets
+FOR EACH ROW
+EXECUTE FUNCTION trg_amw_set_child_balances();
+
+-- (B) AFTER INSERT/UPDATE/DELETE on assigned_mother_wallets:
+--     1) keep mother_wallets.is_available correct
+--     2) keep bundlers.total_balance_* correct
+CREATE OR REPLACE FUNCTION trg_amw_after_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Re-evaluate availability for affected mother_wallet(s)
+  IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
+    PERFORM update_mother_wallet_availability(NEW.mother_wallet_id);
+  END IF;
+  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN
+    PERFORM update_mother_wallet_availability(OLD.mother_wallet_id);
+  END IF;
+
+  -- Refresh bundler totals for affected bundler(s)
+  IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
+    PERFORM refresh_bundler_totals(NEW.bundler_id);
+  END IF;
+  IF (TG_OP = 'UPDATE' OR TG_OP = 'DELETE') THEN
+    PERFORM refresh_bundler_totals(OLD.bundler_id);
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS amw_after_change ON assigned_mother_wallets;
+CREATE TRIGGER amw_after_change
+AFTER INSERT OR UPDATE OR DELETE
+ON assigned_mother_wallets
+FOR EACH ROW
+EXECUTE FUNCTION trg_amw_after_change();
+
+-- (C) AFTER INSERT/UPDATE/DELETE on child_wallets:
+--     recompute assigned_mother_wallets child aggregates for the impacted mother wallet(s)
+CREATE OR REPLACE FUNCTION trg_child_wallets_after_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  old_id BIGINT;
+  new_id BIGINT;
+BEGIN
+  IF (TG_OP = 'INSERT') THEN
+    new_id := NEW.mother_wallet_id;
+    PERFORM refresh_amw_child_balances(new_id);
+
+  ELSIF (TG_OP = 'UPDATE') THEN
+    old_id := OLD.mother_wallet_id;
+    new_id := NEW.mother_wallet_id;
+
+    IF old_id IS DISTINCT FROM new_id THEN
+      PERFORM refresh_amw_child_balances(old_id);
+      PERFORM refresh_amw_child_balances(new_id);
+    ELSE
+      -- Balance or other fields changed, same mother wallet
+      PERFORM refresh_amw_child_balances(new_id);
+    END IF;
+
+  ELSIF (TG_OP = 'DELETE') THEN
+    old_id := OLD.mother_wallet_id;
+    PERFORM refresh_amw_child_balances(old_id);
+  END IF;
+
+  -- Note: Updating AMW triggers will take care of bundler totals + availability.
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS child_wallets_after_change ON child_wallets;
+CREATE TRIGGER child_wallets_after_change
+AFTER INSERT OR UPDATE OF balance_sol, balance_spl, mother_wallet_id OR DELETE
+ON child_wallets
+FOR EACH ROW
+EXECUTE FUNCTION trg_child_wallets_after_change();
+
+-- (D) AFTER UPDATE of bundlers.is_active:
+--     re-evaluate availability for all mother wallets assigned to that bundler
+CREATE OR REPLACE FUNCTION trg_bundlers_is_active_after()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE mother_wallets m
+     SET is_available = NOT EXISTS (
+       SELECT 1
+         FROM assigned_mother_wallets amw
+         JOIN bundlers b ON b.id = amw.bundler_id
+        WHERE amw.mother_wallet_id = m.id
+          AND b.is_active = TRUE
+     )
+   WHERE m.id IN (
+     SELECT mother_wallet_id
+       FROM assigned_mother_wallets
+      WHERE bundler_id = NEW.id
+   );
+
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS bundlers_is_active_after ON bundlers;
+CREATE TRIGGER bundlers_is_active_after
+AFTER UPDATE OF is_active
+ON bundlers
+FOR EACH ROW
+EXECUTE FUNCTION trg_bundlers_is_active_after();
+
+-- ---------- Helpful constraints & notes ----------
+
+-- Optional: ensure mother_wallet public keys are unique (already enforced)
+-- Optional: prevent negative balances (enforced by domain)
+-- Optional: speed up searching by availability
+CREATE INDEX IF NOT EXISTS idx_mother_wallets_available ON mother_wallets(is_available);
+
+COMMIT;
+
+-- =================== QUICK SANITY CHECKS ===================
+-- Insert a mother wallet and some child wallets; then assign to a bundler:
+-- INSERT INTO mother_wallets (private_key, public_key) VALUES ('mpriv1','mpub1');
+-- INSERT INTO child_wallets (private_key, public_key, mother_wallet_id, balance_sol, balance_spl)
+-- VALUES ('cpriv1','cpub1',1, 1.5, 10), ('cpriv2','cpub2',1, 0.5, 5);
+-- INSERT INTO users (user_wallet_id, in_app_private_key, in_app_public_key) VALUES ('u1','p','k');
+-- INSERT INTO bundlers (user_wallet_id, token_name, is_active) VALUES ('u1','TOK', TRUE);
+-- INSERT INTO assigned_mother_wallets (mother_wallet_id, bundler_id) VALUES (1,1);
+-- -- Check: AMW child_balance_* == 2.0 / 15 ; bundlers totals match; mother_wallets.is_available == FALSE.
+-- UPDATE bundlers SET is_active = FALSE WHERE id = 1;
+-- -- Check: mother_wallets.is_available flips back to TRUE.

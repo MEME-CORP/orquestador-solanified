@@ -1,0 +1,596 @@
+openapi: 3.0.3
+info:
+  title: "Blockchain Primitives API"
+  version: "1.0.0"
+  description: "A set of raw, composable, and stateless primitives for a blockchain orchestrator."
+servers:
+  - url: "/api/v1"
+
+paths:
+  /wallet/create:
+    post:
+      summary: "Create a new Solana wallet"
+      tags: [Wallet]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count:
+                  type: integer
+                  description: "Number of wallets to create. Defaults to 1."
+                  default: 1
+      responses:
+        '200':
+          description: "Successfully created wallet(s)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessWalletArray'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /wallet/{publicKey}/balance/sol:
+    get:
+      summary: "Get the SOL balance of a wallet"
+      tags: [Wallet]
+      parameters:
+        - name: publicKey
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "SOL balance retrieved successfully"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessSolBalance'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+ 
+  /sol/advanced-transfer:
+    post:
+      summary: "Transfer SOL in one call: build, sign, send, confirm, and return pre/post balances"
+      tags: [SOL]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fromPublicKey:
+                  type: string
+                toPublicKey:
+                  type: string
+                amountSol:
+                  type: number
+                privateKey:
+                  type: string
+                  description: "Base58 encoded private key for the sender (fee payer). Used only in-memory for signing."
+                computeUnits:
+                  type: integer
+                  description: "Optional. Compute units limit (ComputeBudget)."
+                microLamports:
+                  type: integer
+                  description: "Optional. Micro-lamports per compute unit (ComputeBudget)."
+                commitment:
+                  type: string
+                  enum: [confirmed, finalized]
+                  description: "Optional. Confirmation level to wait for. Default: confirmed."
+              required: [fromPublicKey, toPublicKey, amountSol, privateKey]
+      responses:
+        '200':
+          description: "Advanced transfer executed"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessAdvancedTransfer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  
+
+  /pump/advanced-create:
+    post:
+      summary: "Create a token on Pump.fun in one call: build, multi-sign, send, confirm, and return post balances"
+      tags: [Pump.fun]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                creatorPublicKey:
+                  type: string
+                mintPublicKey:
+                  type: string
+                  description: "Optional. If omitted, the API generates a new mint keypair and returns it in generatedMint."
+                name:
+                  type: string
+                symbol:
+                  type: string
+                description:
+                  type: string
+                imageUrl:
+                  type: string
+                twitter:
+                  type: string
+                telegram:
+                  type: string
+                website:
+                  type: string
+                metadataUri:
+                  type: string
+                  description: "Optional. If provided, skips Pinata upload and uses this URI directly."
+                devBuyAmount:
+                  type: number
+                slippageBps:
+                  type: integer
+                priorityFeeSol:
+                  type: number
+                  description: "Optional. Priority fee in SOL. Defaults to internal value if omitted."
+                privateKey:
+                  type: string
+                  description: "Base58 encoded private key for creator (fee payer). Used only in-memory for signing."
+                mintPrivateKey:
+                  type: string
+                  description: "Optional. Base58 encoded private key for mint. If omitted with mintPublicKey, a new mint is generated. Used only in-memory for signing."
+                commitment:
+                  type: string
+                  enum: [confirmed, finalized]
+                  description: "Optional. Confirmation level to wait for. Default: confirmed."
+              required: [creatorPublicKey, name, symbol, description, imageUrl, devBuyAmount, slippageBps, privateKey]
+      responses:
+        '200':
+          description: "Advanced create executed"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessPumpAdvancedResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pump/advanced-buy:
+    post:
+      summary: "Buy via Pump.fun in one call: build, sign, send, confirm, and return post balances"
+      tags: [Pump.fun]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                buyerPublicKey:
+                  type: string
+                mintAddress:
+                  type: string
+                solAmount:
+                  type: number
+                slippageBps:
+                  type: integer
+                priorityFeeSol:
+                  type: number
+                  description: "Optional. Priority fee in SOL. Defaults to internal value if omitted."
+                privateKey:
+                  type: string
+                  description: "Base58 encoded private key for the buyer (fee payer). Used only in-memory for signing."
+                commitment:
+                  type: string
+                  enum: [confirmed, finalized]
+                  description: "Optional. Confirmation level to wait for. Default: confirmed."
+              required: [buyerPublicKey, mintAddress, solAmount, slippageBps, privateKey]
+      responses:
+        '200':
+          description: "Advanced buy executed"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessPumpAdvancedResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pump/advanced-sell:
+    post:
+      summary: "Sell via Pump.fun in one call: build, sign, send, confirm, and return post balances"
+      tags: [Pump.fun]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sellerPublicKey:
+                  type: string
+                mintAddress:
+                  type: string
+                tokenAmount:
+                  type: string
+                  description: "Percentage like '100%' or numeric token amount (string)."
+                slippageBps:
+                  type: integer
+                priorityFeeSol:
+                  type: number
+                  description: "Optional. Priority fee in SOL. Defaults to internal value if omitted."
+                privateKey:
+                  type: string
+                  description: "Base58 encoded private key for the seller (fee payer). Used only in-memory for signing."
+                commitment:
+                  type: string
+                  enum: [confirmed, finalized]
+                  description: "Optional. Confirmation level to wait for. Default: confirmed."
+              required: [sellerPublicKey, mintAddress, tokenAmount, slippageBps, privateKey]
+      responses:
+        '200':
+          description: "Advanced sell executed"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessPumpAdvancedResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /upload/pinata-image:
+    post:
+      summary: "Upload an image to Pinata (base64)"
+      tags: [Upload]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fileName:
+                  type: string
+                contentType:
+                  type: string
+                  description: "Must start with image/ (e.g., image/png)"
+                imageBase64:
+                  type: string
+                  description: "Base64 payload. Data URI also accepted."
+              required: [fileName, contentType, imageBase64]
+      responses:
+        '200':
+          description: "Image uploaded successfully"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessUploadedImage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  
+components:
+  schemas:
+    AdvancedTransferResult:
+      type: object
+      properties:
+        signature:
+          type: string
+        confirmed:
+          type: boolean
+        commitment:
+          type: string
+          enum: [confirmed, finalized]
+        preBalances:
+          type: object
+          properties:
+            fromLamports:
+              type: string
+            toLamports:
+              type: string
+            fromSol:
+              type: number
+            toSol:
+              type: number
+          required: [fromLamports, toLamports, fromSol, toSol]
+        transfer:
+          type: object
+          properties:
+            amountLamports:
+              type: string
+            rentTopUpLamports:
+              type: string
+            totalLamports:
+              type: string
+          required: [amountLamports, rentTopUpLamports, totalLamports]
+        postBalances:
+          type: object
+          properties:
+            fromLamports:
+              type: string
+            toLamports:
+              type: string
+            fromSol:
+              type: number
+            toSol:
+              type: number
+          required: [fromLamports, toLamports, fromSol, toSol]
+        blockhashInfo:
+          type: object
+          properties:
+            blockhash:
+              type: string
+            lastValidBlockHeight:
+              type: integer
+          required: [blockhash, lastValidBlockHeight]
+      required: [signature, confirmed, commitment, preBalances, transfer, postBalances, blockhashInfo]
+
+    ApiSuccessAdvancedTransfer:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/AdvancedTransferResult'
+      required: [ok, data]
+    UploadedImage:
+      type: object
+      properties:
+        cid:
+          type: string
+        ipfsUri:
+          type: string
+        gatewayUrl:
+          type: string
+        fileName:
+          type: string
+        contentType:
+          type: string
+      required: [cid, ipfsUri, gatewayUrl, fileName, contentType]
+
+    ApiSuccessUploadedImage:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/UploadedImage'
+      required: [ok, data]
+
+    SignedTransaction:
+      type: object
+      properties:
+        signedTx:
+          type: string
+          description: "Base64 encoded, signed, and serialized transaction"
+      required: [signedTx]
+
+    ApiSuccessSignedTx:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/SignedTransaction'
+      required: [ok, data]
+
+    Wallet:
+      type: object
+      properties:
+        publicKey:
+          type: string
+        privateKey:
+          type: string
+          description: "Base58 encoded private key. ONLY returned on creation."
+      required: [publicKey, privateKey]
+
+    SolBalance:
+      type: object
+      properties:
+        publicKey:
+          type: string
+        balanceSol:
+          type: number
+        balanceLamports:
+          type: string
+      required: [publicKey, balanceSol, balanceLamports]
+
+    SplBalance:
+      type: object
+      properties:
+        walletPublicKey:
+          type: string
+        mintAddress:
+          type: string
+        uiAmount:
+          type: number
+        rawAmount:
+          type: string
+      required: [walletPublicKey, mintAddress, uiAmount, rawAmount]
+
+    UnsignedTransaction:
+      type: object
+      properties:
+        unsignedTx:
+          type: string
+          description: "Base64 encoded, unsigned, and serialized transaction"
+      required: [unsignedTx]
+
+    TransactionSignature:
+      type: object
+      properties:
+        signature:
+          type: string
+      required: [signature]
+
+    TransactionStatus:
+      type: object
+      properties:
+        signature:
+          type: string
+        status:
+          type: string
+          enum: [pending, confirmed, finalized, failed]
+      required: [signature, status]
+
+    ApiError:
+      type: object
+      properties:
+        code:
+          type: string
+          example: "INVALID_INPUT"
+        message:
+          type: string
+          example: "The provided public key is not valid."
+      required: [code, message]
+
+    ApiSuccessWalletArray:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Wallet'
+      required: [ok, data]
+
+    ApiSuccessSolBalance:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/SolBalance'
+      required: [ok, data]
+
+    ApiSuccessSplBalance:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/SplBalance'
+      required: [ok, data]
+
+    ApiSuccessUnsignedTx:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/UnsignedTransaction'
+      required: [ok, data]
+
+    ApiSuccessTxSignature:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/TransactionSignature'
+      required: [ok, data]
+
+    ApiSuccessTxStatus:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/TransactionStatus'
+      required: [ok, data]
+
+    PumpAdvancedResult:
+      type: object
+      properties:
+        signature:
+          type: string
+        confirmed:
+          type: boolean
+        commitment:
+          type: string
+          enum: [confirmed, finalized]
+        unsignedTx:
+          type: string
+          description: "Base64 encoded unsigned transaction that was signed and sent (for audit)."
+        postBalances:
+          type: object
+          properties:
+            sol:
+              $ref: '#/components/schemas/SolBalance'
+            spl:
+              $ref: '#/components/schemas/SplBalance'
+          required: [sol, spl]
+      required: [signature, confirmed, commitment, unsignedTx, postBalances]
+
+    ApiSuccessPumpAdvancedResult:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: true
+        data:
+          $ref: '#/components/schemas/PumpAdvancedResult'
+      required: [ok, data]
+
+  responses:
+    BadRequest:
+      description: "Invalid request input"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+                default: false
+              error:
+                $ref: '#/components/schemas/ApiError'
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+                default: false
+              error:
+                $ref: '#/components/schemas/ApiError'
+    InternalServerError:
+      description: "An unexpected error occurred"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+                default: false
+              error:
+                $ref: '#/components/schemas/ApiError'
+
+

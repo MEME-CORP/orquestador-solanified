@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: bundler-orchestrator
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: docker build -t bundler-orchestrator .
+    startCommand: docker run -p $PORT:3000 bundler-orchestrator
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: LOG_LEVEL
+        value: info
+      - key: SUPABASE_URL
+        sync: false  # Set this in Render dashboard
+      - key: SUPABASE_ANON_KEY
+        sync: false  # Set this in Render dashboard
+      - key: EXTERNAL_API_BASE_URL
+        sync: false  # Set this in Render dashboard
+      - key: FRONTEND_URL
+        sync: false  # Set this in Render dashboard
+      - key: ALLOWED_ORIGINS
+        sync: false  # Set this in Render dashboard
+      - key: RATE_LIMIT_MAX
+        value: 100
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 900000
+    # Optional: Auto-deploy settings
+    autoDeploy: true

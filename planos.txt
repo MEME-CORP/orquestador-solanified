@@ -1,0 +1,86 @@
+# Application Workflow
+
+## Rules
+
+* The connected user’s wallet is always sent to the orchestrator.
+* All orchestrator-to-API requests must respect rate limits.
+* If the orchestrator receives a 400 or other error from the API, a retry mechanism is triggered.
+* All buy and sell transactions must leave a minimum of 0.0001 SOL reserved.
+* All sell transactions must be calculated accordingly.
+* Accounts must always retain the minimum SOL balance to ensure that each wallet can send and receive transactions.
+
+## 1. Create In-App Wallet
+
+* **Client**: User connects with a wallet.
+* **Client**: User selects "create bundler."
+* **Client**: System checks if the user exists in the database. If not, the user is asked to create an in-app wallet.
+* **Client**: User requests in-app wallet creation, sending the connected wallet address.
+* **Orchestrator**: Sends request to `/wallet/create`.
+* **Orchestrator**: Receives public/private key pair from API.
+* **Orchestrator**: Registers new user in `users` table with values: user\_wallet, wallet\_in\_app\_private\_key, wallet\_in\_app\_public\_key, and sets balance\_sol = 0.
+* **Client**: UI displays wallet\_in\_app\_public\_key and balance\_sol.
+* **Client**: User is prompted to send SOL funds to the in-app wallet.
+* **Client**: User clicks a button once funds are sent.
+* **Client**: Wallet is sent to orchestrator.
+* **Orchestrator**: Queries `users` using user\_wallet and retrieves wallet\_in\_app\_public\_key.
+* **Orchestrator**: Calls `/wallet/{publicKey}/balance/sol`.
+* **Orchestrator**: Updates balance\_sol in `users` with the API response.
+* **Client**: Updated balance is displayed in the UI.
+* **Client**: UI only allows bundler creation if balance > 0.1 SOL.
+
+## 2. Create Bundler
+
+* **Client**: User continues to create bundler.
+* **Client**: A pop-up asks for the balance to assign, warning that this will be the dev wallet for token creation.
+* **Client**: User enters bundler balance (rules: must be ≤ in-app wallet balance and must be integer values).
+* **Client**: User confirms, sending balance and wallet address.
+* **Orchestrator**: Checks available mother wallets (`is_available = true`).
+
+  * If available wallets < user input, UI shows max allowed.
+  * If sufficient, process continues.
+* **Orchestrator**: Selects mother\_wallets equal to balance. Retrieves mother\_wallets.public\_key and users.wallet\_in\_app\_private\_key.
+* **Orchestrator**: Inserts record into `bundler` with user\_wallet\_id, is\_active = true.
+* **Orchestrator**: Inserts rows into `assigned_mother_wallets` linking mother\_wallet\_id and bundler\_id.
+* **Orchestrator**: Calls `/sol/advanced-transfer` to transfer 1 SOL per mother wallet from in-app wallet.
+* **Orchestrator**: Updates balance\_sol in `mother_wallets` and `users`.
+* **Orchestrator**: Retrieves related child\_wallets.public\_key for each funded mother wallet. Creates ordered list of public keys (each mother wallet has 4 child wallets).
+* **Orchestrator**: Generates randomized distribution (2–3 values, sum = 1 SOL) for child wallet transfers.
+* **Orchestrator**: Calls `/sol/advanced-transfer` to distribute SOL from mother wallets to child wallets.
+* **Orchestrator**: Updates balance\_sol in both `child_wallets` and `mother_wallets`.
+* **Orchestrator**: Notifies client of successful bundler creation.
+* **Client**: UI displays total\_balance\_sol from `bundler` for the most recent bundler tied to user\_wallet, with message that token creation can proceed.
+
+## 3. Token Creation and Purchase
+
+* **Client**: User selects "create token" in Pump.fun. Pop-up form requests: name, symbol, description, logo, twitter, telegram, website, dev\_buy\_amount, slippage, priority\_fee.
+* **Client**: Submits form.
+* **Orchestrator**: Uploads logo to `/upload/pinata-image` and receives URL.
+* **Orchestrator**: Sends all token and wallet data to `/pump/advanced-create`.
+* **Orchestrator**: On success, inserts into `tokens` table: name, symbol, description, image\_url, twitter, telegram, website, dev\_buy\_amount, contract\_address. Updates users.balance\_spl and bundler.token\_name.
+* **Orchestrator**: Immediately starts token purchase using assigned child wallets (private keys + balances). Calls `/pump/advanced-buy`.
+* **Orchestrator**: Updates child\_wallets.balance\_sol and balance\_spl.
+* **Orchestrator**: Notifies client of successful bundler purchase and token creation.
+* **Client**: UI shows bundler.total\_balance\_spl.
+
+## 4. Token Sale with Bundler
+
+* **Client**: User can sell 25%, 50%, 75%, or 100%, or enter a custom percentage.
+* **Client**: Sends request with percentage.
+* **Orchestrator**: Calculates token amount from bundler.total\_balance\_spl. Selects child wallets for sale.
+* **Orchestrator**: Sends `/pump/advanced-sell`.
+* **Orchestrator**: Updates child\_wallets.balance\_spl.
+* **Orchestrator**: Notifies client of successful sale.
+* **Client**: Can perform multiple partial sales.
+* **Orchestrator**: For 100% sale, sells all tokens, updates child\_wallets.balance\_spl, then transfers all SOL back from child\_wallets to in-app wallet via `/sol/advanced-transfer`.
+* **Orchestrator**: Updates balances and sets bundler.is\_active = false.
+
+## 5. Transfer SOL to User Wallet
+
+* **Client**: User selects "transfer funds to registered wallet."
+* **Client**: Request sent to orchestrator.
+* **Orchestrator**: Uses `/sol/advanced-transfer` to send SOL from in-app wallet to user\_wallet.
+* **Orchestrator**: Updates balances in database.
+* **Orchestrator**: Notifies user of successful transfer.
+
+# Endpoints
+
