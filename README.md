@@ -131,7 +131,7 @@ Content-Type: application/json
 
 {
   "user_wallet_id": "user_wallet_address",
-  "bundler_balance": 3,
+  "bundler_balance": X,
   "idempotency_key": "optional-uuid"
 }
 ```
