@@ -60,7 +60,7 @@ class NotificationService {
     } catch (error) {
       const notificationTime = Date.now() - notificationStart;
       
-      // Log error but don't throw - notifications are not critical for the main flow
+      // Log error details for debugging
       logger.error('❌ [NOTIFICATION_SERVICE] Failed to send wallet creation notification', {
         userWalletId,
         inAppPublicKey,
@@ -96,6 +96,9 @@ class NotificationService {
           error_details: 'Frontend notification endpoint returned server error'
         });
       }
+      
+      // Re-throw error so controller can handle it appropriately
+      throw error;
     }
   }
 

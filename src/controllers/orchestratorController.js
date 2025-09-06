@@ -127,7 +127,7 @@ class OrchestratorController {
         db_insert_time_ms: dbInsertTime
       });
 
-      // Step 5: Send success notification to frontend
+      // Step 5: Send success notification to frontend (optional - non-blocking)
       logger.info('📢 [CREATE_WALLET_IN_APP] Sending notification to frontend', {
         requestId,
         user_wallet_id,
@@ -136,17 +136,31 @@ class OrchestratorController {
       });
 
       const notificationStart = Date.now();
-      await notificationService.sendWalletCreationNotification(
-        user_wallet_id,
-        wallet.publicKey
-      );
+      try {
+        await notificationService.sendWalletCreationNotification(
+          user_wallet_id,
+          wallet.publicKey
+        );
+        const notificationTime = Date.now() - notificationStart;
+        
+        logger.info('✅ [CREATE_WALLET_IN_APP] Notification sent successfully', {
+          requestId,
+          user_wallet_id,
+          notification_time_ms: notificationTime
+        });
+      } catch (notificationError) {
+        const notificationTime = Date.now() - notificationStart;
+        
+        logger.warn('⚠️ [CREATE_WALLET_IN_APP] Notification failed but continuing', {
+          requestId,
+          user_wallet_id,
+          notification_time_ms: notificationTime,
+          error: notificationError.message,
+          note: 'Frontend uses polling for wallet detection, notification not critical'
+        });
+      }
+      
       const notificationTime = Date.now() - notificationStart;
-
-      logger.info('✅ [CREATE_WALLET_IN_APP] Notification sent successfully', {
-        requestId,
-        user_wallet_id,
-        notification_time_ms: notificationTime
-      });
 
       // Step 6: Prepare response
       const totalTime = Date.now() - startTime;
