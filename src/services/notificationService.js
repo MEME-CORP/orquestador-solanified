@@ -5,7 +5,7 @@ class NotificationService {
   constructor() {
     this.frontendUrl = process.env.FRONTEND_URL || 'https://frontend-solanified.vercel.app';
     this.notificationClient = axios.create({
-      timeout: 10000, // 10 seconds for notifications
+      timeout: 100000, // 10 seconds for notifications
       headers: {
         'Content-Type': 'application/json'
       }

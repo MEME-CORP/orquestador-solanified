@@ -152,7 +152,7 @@ sigue: crear los endpoints del orquestador
 - crear token:
 # Priority fee
 $computeUnits = 200000         # 200k CUs
-$microLamports = 10000         # 10k micro-lamports per CU (as per quicknode)
+$microLamports = 100000         # 10k micro-lamports per CU (as per quicknode)
 
 # Priority fee (pumpportal)
 

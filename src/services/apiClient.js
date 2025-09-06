@@ -4,7 +4,7 @@ const logger = require('../utils/logger');
 class ApiClient {
   constructor() {
     this.client = axios.create({
-      baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:1000',
+      baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
       timeout: 30000, // 30 seconds for blockchain operations
       headers: {
         'Content-Type': 'application/json',
@@ -61,7 +61,7 @@ class ApiClient {
           originalRequest._retry = true;
           originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
 
-          const delay = Math.pow(2, originalRequest._retryCount) * 1000; // Exponential backoff
+          const delay = Math.pow(2, originalRequest._retryCount) * 10000; // Exponential backoff
           logger.info(`Retrying request in ${delay}ms (attempt ${originalRequest._retryCount})`);
 
           await this.sleep(delay);
