@@ -10,28 +10,90 @@ class WalletService {
    * @returns {Promise<Array>} Array of wallet objects with publicKey and privateKey
    */
   async createInAppWallet(count = 1) {
+    const requestStart = Date.now();
+    
     try {
-      logger.info('Creating in-app wallet(s)', { count });
+      logger.info('🔗 [WALLET_SERVICE] Initiating wallet creation request', {
+        count,
+        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
+        endpoint: '/wallet/create'
+      });
 
       const response = await apiClient.post('/wallet/create', { count });
+      const requestTime = Date.now() - requestStart;
+
+      logger.info('✅ [WALLET_SERVICE] Blockchain API response received', {
+        count,
+        request_time_ms: requestTime,
+        response_ok: response.ok,
+        data_length: response.data ? response.data.length : 0
+      });
 
       if (!ApiResponseValidator.validateWalletCreateResponse(response)) {
+        logger.error('❌ [WALLET_SERVICE] Invalid response format from blockchain API', {
+          count,
+          request_time_ms: requestTime,
+          response_structure: {
+            has_ok: 'ok' in response,
+            has_data: 'data' in response,
+            data_is_array: Array.isArray(response.data),
+            data_length: response.data ? response.data.length : 0
+          }
+        });
         throw new AppError('Invalid wallet creation response format', 502, 'WALLET_CREATION_INVALID_RESPONSE');
       }
 
+      // Log wallet creation details (without exposing private keys)
+      const wallets = response.data.map((wallet, index) => ({
+        index,
+        has_public_key: !!wallet.publicKey,
+        has_private_key: !!wallet.privateKey,
+        public_key_length: wallet.publicKey ? wallet.publicKey.length : 0,
+        private_key_length: wallet.privateKey ? wallet.privateKey.length : 0
+      }));
+
+      logger.info('✅ [WALLET_SERVICE] Wallet creation successful', {
+        count,
+        request_time_ms: requestTime,
+        wallets_created: wallets.length,
+        wallet_details: wallets
+      });
+
       return response.data;
     } catch (error) {
-      logger.error('Error creating in-app wallet:', error);
+      const requestTime = Date.now() - requestStart;
+      
+      logger.error('❌ [WALLET_SERVICE] Wallet creation failed', {
+        count,
+        request_time_ms: requestTime,
+        error_message: error.message,
+        error_code: error.code,
+        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
+        is_network_error: !error.response,
+        http_status: error.response?.status,
+        response_data: error.response?.data
+      });
       
       if (error instanceof AppError) {
         throw error;
       }
       
-      throw new AppError(
-        'Failed to create wallet from external API',
-        502,
-        'EXTERNAL_WALLET_API_ERROR'
-      );
+      // Enhance error context based on error type
+      let errorCode = 'EXTERNAL_WALLET_API_ERROR';
+      let errorMessage = 'Failed to create wallet from external API';
+
+      if (!error.response) {
+        errorCode = 'NETWORK_ERROR';
+        errorMessage = 'Network error while connecting to blockchain API';
+      } else if (error.response.status >= 500) {
+        errorCode = 'BLOCKCHAIN_API_SERVER_ERROR';
+        errorMessage = 'Blockchain API server error';
+      } else if (error.response.status === 429) {
+        errorCode = 'RATE_LIMITED';
+        errorMessage = 'Rate limited by blockchain API';
+      }
+
+      throw new AppError(errorMessage, 502, errorCode);
     }
   }
 

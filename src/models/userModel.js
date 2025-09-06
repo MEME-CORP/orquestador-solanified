@@ -11,7 +11,17 @@ class UserModel {
    * @returns {Promise<Object>} User record
    */
   async createUser(userWalletId, inAppPrivateKey, inAppPublicKey) {
+    const dbOperationStart = Date.now();
+    
     try {
+      logger.info('💾 [USER_MODEL] Initiating user creation in database', {
+        userWalletId,
+        inAppPublicKey,
+        has_private_key: !!inAppPrivateKey,
+        private_key_length: inAppPrivateKey ? inAppPrivateKey.length : 0,
+        public_key_length: inAppPublicKey ? inAppPublicKey.length : 0
+      });
+
       const { data, error } = await supabase
         .from('users')
         .insert({
@@ -24,17 +34,53 @@ class UserModel {
         .select()
         .single();
 
+      const dbOperationTime = Date.now() - dbOperationStart;
+
       if (error) {
+        logger.error('❌ [USER_MODEL] Database error during user creation', {
+          userWalletId,
+          inAppPublicKey,
+          db_operation_time_ms: dbOperationTime,
+          error_code: error.code,
+          error_message: error.message,
+          error_details: error.details,
+          error_hint: error.hint
+        });
+
         if (error.code === '23505') { // Unique constraint violation
+          logger.warn('⚠️ [USER_MODEL] Duplicate user creation attempt', {
+            userWalletId,
+            inAppPublicKey,
+            constraint_violation: 'Primary key constraint on user_wallet_id'
+          });
           throw new AppError('User already exists', 409, 'USER_ALREADY_EXISTS');
         }
         throw error;
       }
 
-      logger.info('User created successfully', { userWalletId, inAppPublicKey });
+      logger.info('✅ [USER_MODEL] User created successfully in database', {
+        userWalletId,
+        inAppPublicKey,
+        db_operation_time_ms: dbOperationTime,
+        user_id: data.id,
+        initial_sol_balance: data.balance_sol,
+        initial_spl_balance: data.balance_spl,
+        created_at: data.created_at || new Date().toISOString()
+      });
+
       return data;
     } catch (error) {
-      logger.error('Error creating user:', { userWalletId, error: error.message });
+      const dbOperationTime = Date.now() - dbOperationStart;
+      
+      logger.error('❌ [USER_MODEL] Failed to create user', {
+        userWalletId,
+        inAppPublicKey,
+        db_operation_time_ms: dbOperationTime,
+        error_message: error.message,
+        error_code: error.code,
+        error_type: error.constructor.name,
+        is_app_error: error instanceof AppError
+      });
       
       if (error instanceof AppError) {
         throw error;

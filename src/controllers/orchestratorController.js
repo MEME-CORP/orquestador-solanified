@@ -22,44 +22,187 @@ class OrchestratorController {
    * POST /api/orchestrator/create-wallet-in-app
    */
   async createWalletInApp(req, res, next) {
+    const startTime = Date.now();
+    const requestId = uuidv4();
+    let user_wallet_id;
+
     try {
-      const { user_wallet_id } = req.body;
+      ({ user_wallet_id } = req.body);
 
-      logger.info('Creating in-app wallet', { user_wallet_id });
+      logger.info('🚀 [CREATE_WALLET_IN_APP] Request started', {
+        requestId,
+        user_wallet_id,
+        timestamp: new Date().toISOString(),
+        endpoint: 'POST /api/orchestrator/create-wallet-in-app',
+        ip: req.ip,
+        userAgent: req.get('User-Agent')
+      });
 
-      // Check if user already exists
-      const existingUser = await userModel.getUserByWalletId(user_wallet_id);
-      if (existingUser && existingUser.in_app_public_key) {
-        throw new AppError('User already has an in-app wallet', 409, 'USER_ALREADY_EXISTS');
+      // Step 1: Validate input
+      if (!user_wallet_id) {
+        logger.error('❌ [CREATE_WALLET_IN_APP] Missing user_wallet_id', {
+          requestId,
+          body: req.body
+        });
+        throw new AppError('user_wallet_id is required', 400, 'MISSING_USER_WALLET_ID');
       }
 
-      // Create wallet via external API
+      logger.info('✅ [CREATE_WALLET_IN_APP] Input validation passed', {
+        requestId,
+        user_wallet_id
+      });
+
+      // Step 2: Check if user already exists
+      logger.info('🔍 [CREATE_WALLET_IN_APP] Checking if user already exists', {
+        requestId,
+        user_wallet_id
+      });
+
+      const existingUser = await userModel.getUserByWalletId(user_wallet_id);
+      
+      if (existingUser) {
+        logger.info('📋 [CREATE_WALLET_IN_APP] User found in database', {
+          requestId,
+          user_wallet_id,
+          has_in_app_wallet: !!existingUser.in_app_public_key,
+          existing_public_key: existingUser.in_app_public_key ? 'exists' : 'none'
+        });
+
+        if (existingUser.in_app_public_key) {
+          logger.warn('⚠️ [CREATE_WALLET_IN_APP] User already has an in-app wallet', {
+            requestId,
+            user_wallet_id,
+            existing_public_key: existingUser.in_app_public_key
+          });
+          throw new AppError('User already has an in-app wallet', 409, 'USER_ALREADY_EXISTS');
+        }
+      } else {
+        logger.info('👤 [CREATE_WALLET_IN_APP] New user - no existing record found', {
+          requestId,
+          user_wallet_id
+        });
+      }
+
+      // Step 3: Create wallet via external blockchain API
+      logger.info('🔗 [CREATE_WALLET_IN_APP] Calling blockchain API to create wallet', {
+        requestId,
+        user_wallet_id,
+        api_endpoint: '/wallet/create',
+        wallet_count: 1
+      });
+
+      const walletCreationStart = Date.now();
       const walletData = await walletService.createInAppWallet(1);
+      const walletCreationTime = Date.now() - walletCreationStart;
+      
       const wallet = walletData[0]; // First wallet from array
 
-      // Store user data in database
+      logger.info('✅ [CREATE_WALLET_IN_APP] Blockchain API call successful', {
+        requestId,
+        user_wallet_id,
+        wallet_creation_time_ms: walletCreationTime,
+        public_key_created: wallet.publicKey,
+        private_key_exists: !!wallet.privateKey
+      });
+
+      // Step 4: Store user data in database
+      logger.info('💾 [CREATE_WALLET_IN_APP] Storing user data in database', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: wallet.publicKey
+      });
+
+      const dbInsertStart = Date.now();
       await userModel.createUser(
         user_wallet_id,
         wallet.privateKey,
         wallet.publicKey
       );
+      const dbInsertTime = Date.now() - dbInsertStart;
 
-      // Send success notification to frontend
+      logger.info('✅ [CREATE_WALLET_IN_APP] User data stored successfully', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: wallet.publicKey,
+        db_insert_time_ms: dbInsertTime
+      });
+
+      // Step 5: Send success notification to frontend
+      logger.info('📢 [CREATE_WALLET_IN_APP] Sending notification to frontend', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: wallet.publicKey,
+        frontend_url: process.env.FRONTEND_URL || 'https://frontend-solanified.vercel.app'
+      });
+
+      const notificationStart = Date.now();
       await notificationService.sendWalletCreationNotification(
         user_wallet_id,
         wallet.publicKey
       );
+      const notificationTime = Date.now() - notificationStart;
 
-      logger.info('In-app wallet created successfully', {
+      logger.info('✅ [CREATE_WALLET_IN_APP] Notification sent successfully', {
+        requestId,
         user_wallet_id,
-        in_app_public_key: wallet.publicKey
+        notification_time_ms: notificationTime
       });
 
-      res.json({
+      // Step 6: Prepare response
+      const totalTime = Date.now() - startTime;
+      const response = {
         in_app_public_key: wallet.publicKey,
         balance_sol: "0"
+      };
+
+      logger.info('🎉 [CREATE_WALLET_IN_APP] Request completed successfully', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: wallet.publicKey,
+        total_time_ms: totalTime,
+        wallet_creation_time_ms: walletCreationTime,
+        db_insert_time_ms: dbInsertTime,
+        notification_time_ms: notificationTime,
+        response_data: response
       });
+
+      res.json(response);
+
     } catch (error) {
+      const totalTime = Date.now() - startTime;
+      
+      logger.error('❌ [CREATE_WALLET_IN_APP] Request failed', {
+        requestId,
+        user_wallet_id: user_wallet_id || 'unknown',
+        error_code: error.code || 'UNKNOWN_ERROR',
+        error_message: error.message,
+        error_stack: error.stack,
+        total_time_ms: totalTime,
+        timestamp: new Date().toISOString()
+      });
+
+      // Log additional context for specific error types
+      if (error.code === 'USER_ALREADY_EXISTS') {
+        logger.warn('⚠️ [CREATE_WALLET_IN_APP] Duplicate wallet creation attempt', {
+          requestId,
+          user_wallet_id,
+          error_details: 'User attempted to create wallet when one already exists'
+        });
+      } else if (error.code === 'EXTERNAL_WALLET_API_ERROR') {
+        logger.error('🔗 [CREATE_WALLET_IN_APP] Blockchain API failure', {
+          requestId,
+          user_wallet_id,
+          error_details: 'Failed to create wallet via external blockchain API',
+          api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000'
+        });
+      } else if (error.code === 'USER_CREATION_FAILED') {
+        logger.error('💾 [CREATE_WALLET_IN_APP] Database operation failure', {
+          requestId,
+          user_wallet_id,
+          error_details: 'Failed to store user data in database'
+        });
+      }
+
       next(error);
     }
   }

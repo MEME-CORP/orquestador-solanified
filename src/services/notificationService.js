@@ -19,11 +19,14 @@ class NotificationService {
    * @returns {Promise<void>}
    */
   async sendWalletCreationNotification(userWalletId, inAppPublicKey) {
+    const notificationStart = Date.now();
+    
     try {
-      logger.info('Sending wallet creation notification to frontend', {
+      logger.info('📢 [NOTIFICATION_SERVICE] Preparing wallet creation notification', {
         userWalletId,
         inAppPublicKey,
-        frontendUrl: this.frontendUrl
+        frontendUrl: this.frontendUrl,
+        notification_type: 'WALLET_CREATED'
       });
 
       const notificationData = {
@@ -34,17 +37,65 @@ class NotificationService {
         timestamp: new Date().toISOString()
       };
 
-      // Send notification to frontend
-      await this.notificationClient.post(`${this.frontendUrl}/api/notifications`, notificationData);
-
-      logger.info('Wallet creation notification sent successfully', { userWalletId });
-    } catch (error) {
-      // Log error but don't throw - notifications are not critical for the main flow
-      logger.error('Failed to send wallet creation notification:', {
+      logger.info('📡 [NOTIFICATION_SERVICE] Sending notification to frontend', {
         userWalletId,
-        error: error.message,
-        frontendUrl: this.frontendUrl
+        frontendUrl: this.frontendUrl,
+        endpoint: '/api/notifications',
+        payload_size: JSON.stringify(notificationData).length
       });
+
+      // Send notification to frontend
+      const response = await this.notificationClient.post(`${this.frontendUrl}/api/notifications`, notificationData);
+      const notificationTime = Date.now() - notificationStart;
+
+      logger.info('✅ [NOTIFICATION_SERVICE] Notification sent successfully', {
+        userWalletId,
+        inAppPublicKey,
+        frontendUrl: this.frontendUrl,
+        notification_time_ms: notificationTime,
+        response_status: response.status,
+        response_data: response.data
+      });
+
+    } catch (error) {
+      const notificationTime = Date.now() - notificationStart;
+      
+      // Log error but don't throw - notifications are not critical for the main flow
+      logger.error('❌ [NOTIFICATION_SERVICE] Failed to send wallet creation notification', {
+        userWalletId,
+        inAppPublicKey,
+        frontendUrl: this.frontendUrl,
+        notification_time_ms: notificationTime,
+        error_message: error.message,
+        error_code: error.code,
+        is_network_error: !error.response,
+        http_status: error.response?.status,
+        response_data: error.response?.data,
+        error_stack: error.stack
+      });
+
+      // Log specific error types for better debugging
+      if (!error.response) {
+        logger.warn('🌐 [NOTIFICATION_SERVICE] Network error - frontend may be unreachable', {
+          userWalletId,
+          frontendUrl: this.frontendUrl,
+          error_details: 'Could not connect to frontend notification endpoint'
+        });
+      } else if (error.response.status === 404) {
+        logger.warn('🔍 [NOTIFICATION_SERVICE] Frontend notification endpoint not found', {
+          userWalletId,
+          frontendUrl: this.frontendUrl,
+          endpoint: '/api/notifications',
+          suggestion: 'Check if frontend has implemented the notification endpoint'
+        });
+      } else if (error.response.status >= 500) {
+        logger.error('🚨 [NOTIFICATION_SERVICE] Frontend server error', {
+          userWalletId,
+          frontendUrl: this.frontendUrl,
+          http_status: error.response.status,
+          error_details: 'Frontend notification endpoint returned server error'
+        });
+      }
     }
   }
 
