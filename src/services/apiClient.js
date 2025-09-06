@@ -4,8 +4,8 @@ const logger = require('../utils/logger');
 class ApiClient {
   constructor() {
     this.client = axios.create({
-      baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
-      timeout: 30000, // 30 seconds for blockchain operations
+      baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
+      timeout: 120000, // 2 minutes for blockchain operations (increased from 30s)
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.EXTERNAL_API_KEY || ''}`

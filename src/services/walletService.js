@@ -15,7 +15,7 @@ class WalletService {
     try {
       logger.info('🔗 [WALLET_SERVICE] Initiating wallet creation request', {
         count,
-        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
+        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
         endpoint: '/wallet/create'
       });
 
@@ -68,7 +68,7 @@ class WalletService {
         request_time_ms: requestTime,
         error_message: error.message,
         error_code: error.code,
-        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com:10000',
+        api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
         is_network_error: !error.response,
         http_status: error.response?.status,
         response_data: error.response?.data
