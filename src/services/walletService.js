@@ -16,10 +16,10 @@ class WalletService {
       logger.info('🔗 [WALLET_SERVICE] Initiating wallet creation request', {
         count,
         api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
-        endpoint: '/wallet/create'
+        endpoint: '/api/v1/wallet/create'
       });
 
-      const response = await apiClient.post('/wallet/create', { count });
+      const response = await apiClient.post('/api/v1/wallet/create', { count });
       const requestTime = Date.now() - requestStart;
 
       logger.info('✅ [WALLET_SERVICE] Blockchain API response received', {
@@ -106,7 +106,7 @@ class WalletService {
     try {
       logger.info('Getting SOL balance', { publicKey });
 
-      const response = await apiClient.get(`/wallet/${publicKey}/balance/sol`);
+      const response = await apiClient.get(`/api/v1/wallet/${publicKey}/balance/sol`);
 
       if (!ApiResponseValidator.validateSolBalanceResponse(response)) {
         throw new AppError('Invalid balance response format', 502, 'BALANCE_INVALID_RESPONSE');

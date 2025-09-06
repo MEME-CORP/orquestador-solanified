@@ -37,7 +37,7 @@ class SolService {
       }
 
       const config = idempotencyKey ? { idempotencyKey } : {};
-      const response = await apiClient.post('/sol/advanced-transfer', transferData, config);
+      const response = await apiClient.post('/api/v1/sol/advanced-transfer', transferData, config);
 
       if (!ApiResponseValidator.validateSolTransferResponse(response)) {
         throw new AppError('Invalid transfer response format', 502, 'TRANSFER_INVALID_RESPONSE');

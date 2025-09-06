@@ -17,7 +17,7 @@ class PumpService {
         devBuyAmount: tokenData.devBuyAmount
       });
 
-      const response = await apiClient.post('/pump/advanced-create', tokenData);
+      const response = await apiClient.post('/api/v1/pump/advanced-create', tokenData);
 
       if (!ApiResponseValidator.validatePumpCreateResponse(response)) {
         throw new AppError('Invalid token creation response format', 502, 'TOKEN_CREATION_INVALID_RESPONSE');
@@ -68,7 +68,7 @@ class PumpService {
         slippage: buyData.slippageBps
       });
 
-      const response = await apiClient.post('/pump/advanced-buy', buyData);
+      const response = await apiClient.post('/api/v1/pump/advanced-buy', buyData);
 
       if (!ApiResponseValidator.validatePumpTradeResponse(response)) {
         throw new AppError('Invalid token buy response format', 502, 'TOKEN_BUY_INVALID_RESPONSE');
@@ -120,7 +120,7 @@ class PumpService {
         slippage: sellData.slippageBps
       });
 
-      const response = await apiClient.post('/pump/advanced-sell', sellData);
+      const response = await apiClient.post('/api/v1/pump/advanced-sell', sellData);
 
       if (!ApiResponseValidator.validatePumpTradeResponse(response)) {
         throw new AppError('Invalid token sell response format', 502, 'TOKEN_SELL_INVALID_RESPONSE');

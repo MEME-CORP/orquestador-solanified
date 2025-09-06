@@ -54,7 +54,7 @@ class UploadService {
         imageBase64: cleanBase64
       };
 
-      const response = await apiClient.post('/upload/pinata-image', uploadData);
+      const response = await apiClient.post('/api/v1/upload/pinata-image', uploadData);
 
       if (!ApiResponseValidator.validateUploadResponse(response)) {
         throw new AppError('Invalid upload response format', 502, 'UPLOAD_INVALID_RESPONSE');
