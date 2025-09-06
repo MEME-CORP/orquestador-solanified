@@ -311,20 +311,19 @@ class OrchestratorController {
             continue;
           }
 
-          // Generate random distribution (2-3 wallets get funds, sum = 0.99 SOL to leave some for fees)
+          // Generate random distribution (ALL 4 child wallets get funds, sum = 0.99 SOL to leave some for fees)
           const distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
           
           const childTransfers = [];
           for (let i = 0; i < childWallets.length; i++) {
-            if (distributions[i] > 0) {
-              childTransfers.push({
-                fromPublicKey: motherWallet.public_key,
-                toPublicKey: childWallets[i].public_key,
-                amountSol: distributions[i],
-                privateKey: motherWallet.private_key,
-                commitment: 'confirmed'
-              });
-            }
+            // All child wallets now receive funds (no need to check > 0)
+            childTransfers.push({
+              fromPublicKey: motherWallet.public_key,
+              toPublicKey: childWallets[i].public_key,
+              amountSol: distributions[i],
+              privateKey: motherWallet.private_key,
+              commitment: 'confirmed'
+            });
           }
 
           if (childTransfers.length > 0) {
@@ -804,32 +803,35 @@ class OrchestratorController {
   }
 
   /**
-   * Generate random distribution for child wallets
-   * @param {number} walletCount - Number of child wallets
+   * Generate random distribution for child wallets - distribute to ALL child wallets
+   * @param {number} walletCount - Number of child wallets (should be 4)
    * @param {number} totalAmount - Total amount to distribute
    * @returns {Array<number>} Array of amounts for each wallet
    */
   static generateRandomDistribution(walletCount, totalAmount) {
     const distributions = new Array(walletCount).fill(0);
     
-    // Randomly select 2-3 wallets to receive funds
-    const recipientCount = Math.min(Math.floor(Math.random() * 2) + 2, walletCount); // 2 or 3 recipients
-    const selectedIndices = [];
-    
-    while (selectedIndices.length < recipientCount) {
-      const index = Math.floor(Math.random() * walletCount);
-      if (!selectedIndices.includes(index)) {
-        selectedIndices.push(index);
-      }
+    // Distribute to ALL child wallets (not just 2-3)
+    // Generate random weights for all wallets
+    const weights = [];
+    for (let i = 0; i < walletCount; i++) {
+      weights.push(Math.random());
     }
-
-    // Generate random weights
-    const weights = selectedIndices.map(() => Math.random());
+    
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
 
-    // Distribute amounts based on weights
-    selectedIndices.forEach((index, i) => {
-      distributions[index] = (weights[i] / totalWeight) * totalAmount;
+    // Distribute amounts based on weights to ALL wallets
+    for (let i = 0; i < walletCount; i++) {
+      distributions[i] = (weights[i] / totalWeight) * totalAmount;
+    }
+
+    logger.info('Generated distribution for child wallets', {
+      walletCount,
+      totalAmount,
+      distributions: distributions.map((amount, index) => ({ 
+        wallet: index, 
+        amount: amount.toFixed(9) 
+      }))
     });
 
     return distributions;
