@@ -10,6 +10,12 @@ class BundlerModel {
    * @returns {Promise<Object>} Created bundler with assigned mother wallets
    */
   async createBundlerWithMotherWallets(userWalletId, motherWalletCount) {
+    // Check if pgPool is available, otherwise use Supabase client
+    if (!pgPool) {
+      logger.warn('PostgreSQL pool not available, falling back to Supabase client for bundler creation');
+      return await this.createBundlerWithMotherWalletsSupabase(userWalletId, motherWalletCount);
+    }
+
     const client = await pgPool.connect();
     
     try {
@@ -87,6 +93,118 @@ class BundlerModel {
       throw new AppError('Failed to create bundler', 500, 'BUNDLER_CREATION_FAILED');
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Create bundler using Supabase client (fallback when PostgreSQL pool unavailable)
+   * @param {string} userWalletId - User's wallet ID
+   * @param {number} motherWalletCount - Number of mother wallets to assign
+   * @returns {Promise<Object>} Created bundler with assigned mother wallets
+   */
+  async createBundlerWithMotherWalletsSupabase(userWalletId, motherWalletCount) {
+    try {
+      // Note: Supabase doesn't support row-level locking like PostgreSQL's "FOR UPDATE SKIP LOCKED"
+      // This is a simplified version that may have race conditions in high-concurrency scenarios
+      
+      // First, get available mother wallets
+      const { data: availableWallets, error: walletsError } = await supabase
+        .from('mother_wallets')
+        .select('id, public_key, private_key')
+        .eq('is_available', true)
+        .limit(motherWalletCount);
+
+      if (walletsError) {
+        logger.error('Error fetching available mother wallets:', walletsError);
+        throw new AppError('Failed to fetch available mother wallets', 500, 'SUPABASE_QUERY_ERROR');
+      }
+
+      if (!availableWallets || availableWallets.length < motherWalletCount) {
+        throw new AppError(
+          `Only ${availableWallets?.length || 0} mother wallets available, need ${motherWalletCount}`,
+          409,
+          'INSUFFICIENT_MOTHER_WALLETS'
+        );
+      }
+
+      // Create bundler record
+      const { data: bundlerData, error: bundlerError } = await supabase
+        .from('bundlers')
+        .insert({
+          user_wallet_id: userWalletId,
+          is_active: true,
+          token_name: null
+        })
+        .select('id')
+        .single();
+
+      if (bundlerError) {
+        logger.error('Error creating bundler:', bundlerError);
+        throw new AppError('Failed to create bundler', 500, 'BUNDLER_CREATION_FAILED');
+      }
+
+      const bundlerId = bundlerData.id;
+
+      // Mark mother wallets as unavailable and assign them to bundler
+      const walletIds = availableWallets.map(w => w.id);
+      
+      // Update mother wallets availability
+      const { error: updateError } = await supabase
+        .from('mother_wallets')
+        .update({ is_available: false })
+        .in('id', walletIds);
+
+      if (updateError) {
+        logger.error('Error updating mother wallet availability:', updateError);
+        // Try to rollback bundler creation
+        await supabase.from('bundlers').delete().eq('id', bundlerId);
+        throw new AppError('Failed to reserve mother wallets', 500, 'WALLET_RESERVATION_FAILED');
+      }
+
+      // Create assignments
+      const assignments = availableWallets.map(wallet => ({
+        mother_wallet_id: wallet.id,
+        bundler_id: bundlerId
+      }));
+
+      const { error: assignmentError } = await supabase
+        .from('assigned_mother_wallets')
+        .insert(assignments);
+
+      if (assignmentError) {
+        logger.error('Error creating wallet assignments:', assignmentError);
+        // Try to rollback
+        await supabase.from('mother_wallets').update({ is_available: true }).in('id', walletIds);
+        await supabase.from('bundlers').delete().eq('id', bundlerId);
+        throw new AppError('Failed to assign mother wallets', 500, 'WALLET_ASSIGNMENT_FAILED');
+      }
+
+      logger.info('Bundler created with mother wallets using Supabase', {
+        bundlerId,
+        userWalletId,
+        motherWalletsAssigned: availableWallets.length
+      });
+
+      return {
+        bundler_id: bundlerId,
+        allocated_mother_wallets: availableWallets.map(wallet => ({
+          id: wallet.id,
+          public_key: wallet.public_key,
+          private_key: wallet.private_key
+        }))
+      };
+    } catch (error) {
+      logger.error('Error creating bundler with mother wallets via Supabase:', {
+        userWalletId,
+        motherWalletCount,
+        error: error.message
+      });
+      
+      if (error instanceof AppError) {
+        throw error;
+      }
+      
+      throw new AppError('Failed to create bundler', 500, 'BUNDLER_CREATION_FAILED');
     }
   }
 
