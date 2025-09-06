@@ -1,5 +1,5 @@
-# Use the official Node.js 18 LTS image
-FROM node:18-alpine
+# Use the official Node.js 20 LTS image
+FROM node:20-alpine
 
 # Set the working directory inside the container
 WORKDIR /usr/src/app
@@ -26,9 +26,9 @@ USER nextjs
 # Expose the port the app runs on
 EXPOSE 3000
 
-# Add health check
+# Add health check (use PORT env var if available, fallback to 3000)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
+  CMD node -e "const port = process.env.PORT || 3000; require('http').get(\`http://localhost:\${port}/health\`, (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
 
 # Start the application
 CMD ["npm", "start"]

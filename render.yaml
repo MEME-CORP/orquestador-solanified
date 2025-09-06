@@ -5,14 +5,10 @@ services:
     plan: starter
     region: oregon
     branch: main
-    buildCommand: docker build -t bundler-orchestrator .
-    startCommand: docker run -p $PORT:3000 bundler-orchestrator
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000
       - key: LOG_LEVEL
         value: info
       - key: SUPABASE_URL
