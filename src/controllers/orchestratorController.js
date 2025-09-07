@@ -611,11 +611,31 @@ class OrchestratorController {
             userPublicKey: user.in_app_public_key,
             error: fallbackError.message,
             signature: creationBalances.signature,
-            fallback_strategy: 'preserve_zero_balance'
+            fallback_strategy: 'estimate_from_dev_buy'
           });
 
-          // Keep SPL balance as 0 if API fails - this is safer than guessing
-          finalSplBalance = 0;
+          // If blockchain API fails, estimate SPL balance based on dev buy amount
+          // This is a reasonable estimate since we know tokens were purchased
+          if (dev_buy_amount && parseFloat(dev_buy_amount) > 0) {
+            // Estimate SPL tokens received based on typical pump.fun mechanics
+            // This is approximate but better than leaving it at 0 when we know tokens were bought
+            const devBuyAmountSol = parseFloat(dev_buy_amount);
+            const estimatedSplTokens = devBuyAmountSol * 1000000; // Rough estimate: 1 SOL = ~1M tokens (varies by bonding curve)
+            
+            finalSplBalance = estimatedSplTokens;
+            
+            logger.warn('Estimated SPL balance based on dev buy amount', {
+              user_wallet_id,
+              contractAddress,
+              devBuyAmountSol,
+              estimatedSplTokens,
+              signature: creationBalances.signature,
+              note: 'This is an estimate - actual balance may vary'
+            });
+          } else {
+            // Keep SPL balance as 0 if we can't estimate
+            finalSplBalance = 0;
+          }
         }
       }
 
@@ -1896,6 +1916,146 @@ class OrchestratorController {
           error_details: 'Failed to sell SPL tokens via Pump.fun API'
         });
       }
+
+      next(error);
+    }
+  }
+
+  /**
+   * Verify user SPL balance after token creation
+   * POST /api/orchestrator/verify-user-spl-balance
+   */
+  async verifyUserSplBalance(req, res, next) {
+    const startTime = Date.now();
+    const requestId = uuidv4();
+
+    try {
+      const { user_wallet_id } = req.body;
+
+      logger.info('🚀 [VERIFY_USER_SPL_BALANCE] Request started', {
+        requestId,
+        user_wallet_id,
+        timestamp: new Date().toISOString(),
+        endpoint: 'POST /api/orchestrator/verify-user-spl-balance',
+        ip: req.ip,
+        userAgent: req.get('User-Agent')
+      });
+
+      // Step 1: Validate input
+      if (!user_wallet_id) {
+        logger.error('❌ [VERIFY_USER_SPL_BALANCE] Missing user_wallet_id', {
+          requestId,
+          body: req.body
+        });
+        throw new AppError('user_wallet_id is required', 400, 'MISSING_USER_WALLET_ID');
+      }
+
+      // Step 2: Get user data
+      const user = await userModel.getUserByWalletId(user_wallet_id);
+      if (!user) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      if (!user.in_app_public_key) {
+        throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
+      }
+
+      // Step 3: Get latest token for user
+      const token = await tokenModel.getLatestTokenByUser(user_wallet_id);
+      if (!token) {
+        throw new AppError('No token found for user', 404, 'TOKEN_NOT_FOUND');
+      }
+
+      const contractAddress = token.contract_address;
+
+      logger.info('✅ [VERIFY_USER_SPL_BALANCE] Token found for verification', {
+        requestId,
+        user_wallet_id,
+        contractAddress,
+        tokenSymbol: token.symbol,
+        currentSplBalance: user.balance_spl
+      });
+
+      // Step 4: Get actual SPL balance from blockchain
+      const balanceCheckStart = Date.now();
+      const actualSplBalance = await walletService.getSplBalance(
+        contractAddress,
+        user.in_app_public_key,
+        { maxRetries: 5, logProgress: true }
+      );
+      const balanceCheckTime = Date.now() - balanceCheckStart;
+
+      const verifiedBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+
+      logger.info('✅ [VERIFY_USER_SPL_BALANCE] SPL balance retrieved from blockchain', {
+        requestId,
+        user_wallet_id,
+        contractAddress,
+        currentDbBalance: user.balance_spl,
+        verifiedBlockchainBalance: verifiedBalance,
+        balanceCheckTime
+      });
+
+      // Step 5: Update database if balance is different
+      let balanceUpdated = false;
+      const currentDbBalance = parseFloat(user.balance_spl) || 0;
+      
+      if (Math.abs(currentDbBalance - verifiedBalance) > 0.000001) { // Tolerance for floating point comparison
+        await userModel.updateSplBalance(user_wallet_id, verifiedBalance);
+        balanceUpdated = true;
+
+        logger.info('✅ [VERIFY_USER_SPL_BALANCE] User SPL balance updated', {
+          requestId,
+          user_wallet_id,
+          previousBalance: currentDbBalance,
+          newBalance: verifiedBalance,
+          difference: verifiedBalance - currentDbBalance
+        });
+      } else {
+        logger.info('ℹ️ [VERIFY_USER_SPL_BALANCE] Balance already accurate, no update needed', {
+          requestId,
+          user_wallet_id,
+          currentBalance: verifiedBalance
+        });
+      }
+
+      // Step 6: Prepare response
+      const totalTime = Date.now() - startTime;
+      const response = {
+        user_wallet_id,
+        token_contract_address: contractAddress,
+        token_symbol: token.symbol,
+        previous_spl_balance: currentDbBalance,
+        verified_spl_balance: verifiedBalance,
+        balance_updated: balanceUpdated,
+        balance_difference: verifiedBalance - currentDbBalance,
+        verification_time_ms: totalTime
+      };
+
+      logger.info('🎉 [VERIFY_USER_SPL_BALANCE] Request completed successfully', {
+        requestId,
+        user_wallet_id,
+        contractAddress,
+        totalTime,
+        balanceCheckTime,
+        balanceUpdated,
+        response
+      });
+
+      res.json(response);
+
+    } catch (error) {
+      const totalTime = Date.now() - startTime;
+      
+      logger.error('❌ [VERIFY_USER_SPL_BALANCE] Request failed', {
+        requestId,
+        user_wallet_id: req.body?.user_wallet_id || 'unknown',
+        error_code: error.code || 'UNKNOWN_ERROR',
+        error_message: error.message,
+        error_stack: error.stack,
+        totalTime,
+        timestamp: new Date().toISOString()
+      });
 
       next(error);
     }

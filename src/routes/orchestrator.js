@@ -65,6 +65,16 @@ router.post(
 );
 
 /**
+ * Verify user SPL balance after token creation
+ * POST /api/orchestrator/verify-user-spl-balance
+ */
+router.post(
+  '/verify-user-spl-balance',
+  validateRequest(verifyInAppSolBalanceSchema), // Reuse same schema (just needs user_wallet_id)
+  orchestratorController.verifyUserSplBalance
+);
+
+/**
  * Verify in-app SOL balance
  * POST /api/orchestrator/verify-in-app-sol-balance
  */
