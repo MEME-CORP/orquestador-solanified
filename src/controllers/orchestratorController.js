@@ -759,34 +759,21 @@ class OrchestratorController {
                  }
                }
                
-               // Update wallet balances with protective logic
-               if (shouldUpdateSplBalance) {
-                 await walletModel.updateChildWalletBalances(
-                   wallet.public_key,
-                   balances.solBalance,
-                   finalSplBalance
-                 );
-                 
-                 logger.info('Child wallet balances updated', {
-                   walletPublicKey: wallet.public_key,
-                   solBalance: balances.solBalance,
-                   splBalance: finalSplBalance,
-                   signature: result.data?.signature
-                 });
-               } else {
-                 // Update only SOL balance, preserve existing SPL balance
-                 await walletModel.updateChildWalletSolBalance(
-                   wallet.public_key,
-                   balances.solBalance
-                 );
-                 
-                 logger.info('Updated SOL balance only, preserved existing SPL balance', {
-                   walletPublicKey: wallet.public_key,
-                   solBalance: balances.solBalance,
-                   signature: result.data?.signature,
-                   note: 'SPL balance preserved due to API issues'
-                 });
-               }
+                // Always update both SOL and SPL balances - critical fix for buy operations
+                await walletModel.updateChildWalletBalances(
+                  wallet.public_key,
+                  balances.solBalance,
+                  finalSplBalance
+                );
+                
+                logger.info('Child wallet balances updated after buy', {
+                  walletPublicKey: wallet.public_key,
+                  solBalance: balances.solBalance,
+                  splBalance: finalSplBalance,
+                  signature: result.data?.signature,
+                  splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_or_preserved',
+                  balanceUpdateMethod: 'both_sol_and_spl'
+                });
                
                successfulBuys++;
              }
@@ -1154,34 +1141,21 @@ class OrchestratorController {
               }
             }
             
-            // Update wallet balances with protective logic
-            if (shouldUpdateSplBalance) {
-              await walletModel.updateChildWalletBalances(
-                wallet.public_key,
-                balances.solBalance,
-                finalSplBalance
-              );
-              
-              logger.info('Child wallet balances updated after sell', {
-                walletPublicKey: wallet.public_key,
-                solBalance: balances.solBalance,
-                splBalance: finalSplBalance,
-                signature: result.data?.signature
-              });
-            } else {
-              // Update only SOL balance, preserve existing SPL balance
-              await walletModel.updateChildWalletSolBalance(
-                wallet.public_key,
-                balances.solBalance
-              );
-              
-              logger.info('Updated SOL balance only after sell, preserved existing SPL balance', {
-                walletPublicKey: wallet.public_key,
-                solBalance: balances.solBalance,
-                signature: result.data?.signature,
-                note: 'SPL balance preserved due to API issues'
-              });
-            }
+             // Always update both SOL and SPL balances - critical fix for sell operations
+             await walletModel.updateChildWalletBalances(
+               wallet.public_key,
+               balances.solBalance,
+               finalSplBalance
+             );
+             
+             logger.info('Child wallet balances updated after sell', {
+               walletPublicKey: wallet.public_key,
+               solBalance: balances.solBalance,
+               splBalance: finalSplBalance,
+               signature: result.data?.signature,
+               splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_expected',
+               balanceUpdateMethod: 'both_sol_and_spl'
+             });
             
             successfulSellUpdates++;
           }

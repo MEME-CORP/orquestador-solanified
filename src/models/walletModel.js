@@ -53,7 +53,14 @@ class WalletModel {
         throw error;
       }
 
-      logger.info('Child wallet balances updated', { publicKey, balanceSol, balanceSpl });
+      logger.info('Child wallet balances updated', { 
+        publicKey, 
+        balanceSol, 
+        balanceSpl,
+        updateType: 'both_sol_and_spl',
+        solChanged: data.balance_sol !== balanceSol,
+        splChanged: data.balance_spl !== balanceSpl
+      });
       return data;
     } catch (error) {
       logger.error('Error updating child wallet balances:', { publicKey, error: error.message });
