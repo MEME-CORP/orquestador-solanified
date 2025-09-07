@@ -566,12 +566,75 @@ class OrchestratorController {
         signature: creationBalances.signature
       });
 
-      // Update user SOL and SPL balances from token creation
+      // Update user SOL balance from token creation
       if (creationBalances.solBalance > 0) {
         await userModel.updateSolBalance(user_wallet_id, creationBalances.solBalance);
       }
-      if (creationBalances.splBalance > 0) {
-        await userModel.updateSplBalance(user_wallet_id, creationBalances.splBalance);
+
+      // Handle SPL balance update with blockchain API fallback
+      let finalSplBalance = creationBalances.splBalance;
+      
+      if (creationBalances.splBalance === 0) {
+        logger.warn('SPL balance is 0 after token creation - fetching from blockchain API', {
+          user_wallet_id,
+          contractAddress,
+          userPublicKey: user.in_app_public_key,
+          signature: creationBalances.signature,
+          strategy: 'blockchain_api_fallback'
+        });
+
+        try {
+          // Add a small delay to allow blockchain settlement
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+          
+          const actualSplBalance = await walletService.getSplBalance(
+            contractAddress,
+            user.in_app_public_key,
+            { maxRetries: 3, logProgress: true }
+          );
+
+          finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+
+          logger.info('Successfully retrieved SPL balance from blockchain API after token creation', {
+            user_wallet_id,
+            contractAddress,
+            userPublicKey: user.in_app_public_key,
+            apiResponseBalance: creationBalances.splBalance,
+            blockchainActualBalance: finalSplBalance,
+            signature: creationBalances.signature
+          });
+
+        } catch (fallbackError) {
+          logger.error('Failed to retrieve SPL balance from blockchain API after token creation', {
+            user_wallet_id,
+            contractAddress,
+            userPublicKey: user.in_app_public_key,
+            error: fallbackError.message,
+            signature: creationBalances.signature,
+            fallback_strategy: 'preserve_zero_balance'
+          });
+
+          // Keep SPL balance as 0 if API fails - this is safer than guessing
+          finalSplBalance = 0;
+        }
+      }
+
+      // Update user SPL balance (either from API response or blockchain API)
+      if (finalSplBalance > 0) {
+        await userModel.updateSplBalance(user_wallet_id, finalSplBalance);
+        
+        logger.info('User SPL balance updated after token creation', {
+          user_wallet_id,
+          splBalance: finalSplBalance,
+          balanceSource: creationBalances.splBalance > 0 ? 'api_response' : 'blockchain_api_fallback'
+        });
+      } else {
+        logger.warn('SPL balance remains 0 after token creation and fallback attempts', {
+          user_wallet_id,
+          contractAddress,
+          signature: creationBalances.signature,
+          note: 'Balance may need manual verification or delayed update'
+        });
       }
 
       // Get child wallets for buying
@@ -1186,7 +1249,62 @@ class OrchestratorController {
           
           if (balances.publicKey) {
             let finalSplBalance = balances.splBalance;
+            let finalSolBalance = balances.solBalance;
             let shouldUpdateSplBalance = true;
+            let shouldUpdateSolBalance = true;
+            
+            // Store original balances for comparison
+            const originalSolBalance = parseFloat(wallet.balance_sol) || 0;
+            const originalSplBalance = parseFloat(wallet.balance_spl) || 0;
+            
+            // Check if SOL balance hasn't changed (potential timing issue)
+            const solBalanceUnchanged = Math.abs(originalSolBalance - balances.solBalance) < 0.000001; // 1 microSOL tolerance
+            
+            if (solBalanceUnchanged && result.data?.signature) {
+              logger.warn('SOL balance appears unchanged after sell - verifying with blockchain API', {
+                walletPublicKey: wallet.public_key,
+                originalSolBalance: originalSolBalance,
+                apiResponseSolBalance: balances.solBalance,
+                signature: result.data.signature,
+                sellPercent: sell_percent,
+                strategy: 'blockchain_api_verification'
+              });
+              
+              try {
+                // Add delay to avoid overwhelming the API
+                if (i > 0) {
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                
+                const actualSolBalance = await walletService.getSolBalance(
+                  wallet.public_key,
+                  { maxRetries: 2, logProgress: true }
+                );
+                
+                finalSolBalance = actualSolBalance.balanceSol || 0;
+                
+                logger.info('Successfully retrieved real SOL balance from blockchain API after sell', {
+                  walletPublicKey: wallet.public_key,
+                  originalSolBalance: originalSolBalance,
+                  apiResponseSolBalance: balances.solBalance,
+                  blockchainActualSolBalance: finalSolBalance,
+                  signature: result.data.signature,
+                  balanceDifference: finalSolBalance - originalSolBalance
+                });
+                
+              } catch (solFallbackError) {
+                logger.error('Blockchain API SOL balance fallback failed for sell', {
+                  walletPublicKey: wallet.public_key,
+                  signature: result.data.signature,
+                  error: solFallbackError.message,
+                  sellPercent: sell_percent,
+                  strategy: 'preserve_api_response'
+                });
+                
+                // Keep the API response balance if blockchain verification fails
+                finalSolBalance = balances.solBalance;
+              }
+            }
             
             // Enhanced fallback strategy for zero SPL balance on successful sell transactions
             if (balances.splBalance === 0 && result.data?.signature) {
@@ -1284,17 +1402,19 @@ class OrchestratorController {
              // Always update both SOL and SPL balances - critical fix for sell operations
              await walletModel.updateChildWalletBalances(
                wallet.public_key,
-               balances.solBalance,
+               finalSolBalance,
                finalSplBalance
              );
              
              logger.info('Child wallet balances updated after sell', {
                walletPublicKey: wallet.public_key,
-               solBalance: balances.solBalance,
+               solBalance: finalSolBalance,
                splBalance: finalSplBalance,
                signature: result.data?.signature,
+               solBalanceSource: solBalanceUnchanged ? 'blockchain_api_verified' : 'api_response',
                splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_expected',
-               balanceUpdateMethod: 'both_sol_and_spl'
+               balanceUpdateMethod: 'both_sol_and_spl',
+               solBalanceVerified: solBalanceUnchanged
              });
             
             successfulSellUpdates++;
