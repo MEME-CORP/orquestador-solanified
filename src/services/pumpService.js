@@ -221,17 +221,35 @@ class PumpService {
                            error.message?.includes('rate limit') ||
                            (error.statusCode === 400 && error.message?.includes('max 1 req/s'));
         
-        // Check if it's an insufficient balance error
-        const isInsufficientBalance = error.message?.includes('insufficient lamports') ||
-                                    error.message?.includes('Transfer: insufficient');
+         // Check if it's an insufficient balance error
+         const isInsufficientBalance = error.message?.includes('insufficient lamports') ||
+                                     error.message?.includes('Transfer: insufficient') ||
+                                     error.message?.includes('Simulation failed') && 
+                                     error.message?.includes('custom program error: 0x1');
         
         if (isInsufficientBalance) {
+          // Extract actual balance from error message if available
+          const actualBalance = this.extractBalanceFromError(error.message);
+          
           logger.error('Insufficient balance detected, not retrying', {
             buyer: buyData.buyerPublicKey,
-            solAmount: buyData.solAmount,
+            requestedAmount: buyData.solAmount,
+            actualBalanceFromError: actualBalance,
             error: error.message
           });
-          throw error; // Don't retry insufficient balance errors
+          
+          // Create enhanced error with balance info for controller to handle
+          const enhancedError = new AppError(
+            `Insufficient balance: requested ${buyData.solAmount} SOL, actual balance ${actualBalance || 'unknown'} SOL`,
+            400,
+            'INSUFFICIENT_BALANCE',
+            {
+              requestedAmount: buyData.solAmount,
+              actualBalance: actualBalance,
+              walletPublicKey: buyData.buyerPublicKey
+            }
+          );
+          throw enhancedError;
         }
         
         if (isRateLimit && attempt < maxRetries) {
@@ -270,6 +288,30 @@ class PumpService {
    */
   async sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Extract actual balance from blockchain error message
+   * @param {string} errorMessage - Error message from blockchain
+   * @returns {number|null} Actual balance in SOL or null if not found
+   */
+  extractBalanceFromError(errorMessage) {
+    try {
+      // Look for pattern: "insufficient lamports 48925568, need 50972165"
+      const match = errorMessage.match(/insufficient lamports (\d+), need (\d+)/);
+      if (match) {
+        const actualLamports = parseInt(match[1]);
+        const actualSol = actualLamports / 1000000000; // Convert lamports to SOL
+        return actualSol;
+      }
+      return null;
+    } catch (error) {
+      logger.warn('Could not extract balance from error message', { 
+        errorMessage, 
+        extractionError: error.message 
+      });
+      return null;
+    }
   }
 
   /**

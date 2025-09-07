@@ -495,22 +495,33 @@ class OrchestratorController {
 
       // Filter child wallets with sufficient SOL balance for buying (using database values)
       const MIN_BUY_AMOUNT = 0.001;
-      const MIN_FEE_RESERVE = 0.002; // Reserve more for transaction fees + priority fees
+      const BUY_TRANSACTION_FEE = 0.003; // SOL needed for buy transaction + priority fee
+      const SELL_TRANSACTION_FEE = 0.003; // SOL that must remain for future sell transactions
+      const SAFETY_BUFFER = 0.002; // Additional safety buffer for balance discrepancies
+      const TOTAL_REQUIRED_RESERVE = BUY_TRANSACTION_FEE + SELL_TRANSACTION_FEE + SAFETY_BUFFER;
       const buyableWallets = [];
 
-      logger.info('Checking child wallet balances from database', {
-        totalChildWallets: childWallets.length,
-        minBuyAmount: MIN_BUY_AMOUNT,
-        feeReserve: MIN_FEE_RESERVE
-      });
+        logger.info('Checking child wallet balances with buy/sell fee considerations', {
+          totalChildWallets: childWallets.length,
+          minBuyAmount: MIN_BUY_AMOUNT,
+          buyTransactionFee: BUY_TRANSACTION_FEE,
+          sellTransactionFee: SELL_TRANSACTION_FEE,
+          safetyBuffer: SAFETY_BUFFER,
+          totalRequiredReserve: TOTAL_REQUIRED_RESERVE
+        });
 
       for (const wallet of childWallets) {
         const dbBalance = parseFloat(wallet.balance_sol);
-        const availableForBuy = Math.max(dbBalance - MIN_FEE_RESERVE, 0);
+        // Calculate available amount considering buy fees, sell fees, and safety buffer
+        const availableForBuy = Math.max(dbBalance - TOTAL_REQUIRED_RESERVE, 0);
         
-        logger.info('Child wallet balance check (database)', {
+        logger.info('Child wallet balance check - buy/sell fee aware', {
           publicKey: wallet.public_key,
           dbBalance,
+          buyTransactionFee: BUY_TRANSACTION_FEE,
+          sellTransactionFee: SELL_TRANSACTION_FEE,
+          safetyBuffer: SAFETY_BUFFER,
+          totalReserved: TOTAL_REQUIRED_RESERVE,
           availableForBuy,
           meetsMinimum: availableForBuy >= MIN_BUY_AMOUNT
         });
@@ -518,25 +529,35 @@ class OrchestratorController {
         if (availableForBuy >= MIN_BUY_AMOUNT) {
           buyableWallets.push({
             ...wallet,
-            availableForBuy: Math.min(availableForBuy, 0.5) // Cap max buy amount to prevent issues
+            // Apply conservative reduction and cap at 0.25 SOL (reduced due to sell fee consideration)
+            availableForBuy: Math.min(availableForBuy * 0.85, 0.25)
           });
         }
       }
 
       if (buyableWallets.length === 0) {
-        logger.warn('No child wallets have sufficient balance for buying', {
+        logger.warn('No child wallets have sufficient balance for buying (including sell fees)', {
           totalWallets: childWallets.length,
-          minRequired: MIN_BUY_AMOUNT + MIN_FEE_RESERVE,
+          minRequired: MIN_BUY_AMOUNT + TOTAL_REQUIRED_RESERVE,
+          breakdown: {
+            minBuyAmount: MIN_BUY_AMOUNT,
+            buyTransactionFee: BUY_TRANSACTION_FEE,
+            sellTransactionFee: SELL_TRANSACTION_FEE,
+            safetyBuffer: SAFETY_BUFFER,
+            total: MIN_BUY_AMOUNT + TOTAL_REQUIRED_RESERVE
+          },
           walletBalances: childWallets.map(w => ({
             publicKey: w.public_key,
-            dbBalance: parseFloat(w.balance_sol)
+            dbBalance: parseFloat(w.balance_sol),
+            shortfall: Math.max(0, (MIN_BUY_AMOUNT + TOTAL_REQUIRED_RESERVE) - parseFloat(w.balance_sol))
           }))
         });
       } else {
-        // Execute buy operations with conservative amounts based on database values
-        logger.info('Executing buy operations with database-based calculations', { 
+        // Execute buy operations with sell-fee-aware calculations
+        logger.info('Executing buy operations with sell-fee considerations', { 
           walletCount: buyableWallets.length,
-          totalAvailable: buyableWallets.reduce((sum, w) => sum + w.availableForBuy, 0).toFixed(6)
+          totalAvailable: buyableWallets.reduce((sum, w) => sum + w.availableForBuy, 0).toFixed(6),
+          sellFeesReserved: (SELL_TRANSACTION_FEE * buyableWallets.length).toFixed(6)
         });
         
         const buyOperations = buyableWallets.map(wallet => ({
@@ -550,21 +571,29 @@ class OrchestratorController {
         }));
 
         // Log the prepared operations for debugging
-        logger.info('Buy operations prepared with database-based calculations', {
+        logger.info('Buy operations prepared with sell-fee awareness', {
           operations: buyOperations.map((op, i) => ({
             index: i,
             wallet: op.buyerPublicKey,
             dbBalance: parseFloat(buyableWallets[i].balance_sol),
             solAmountToBuy: op.solAmount,
-            feeReserved: MIN_FEE_RESERVE,
-            priorityFee: op.priorityFeeSol
+            reservedForBuyFee: BUY_TRANSACTION_FEE,
+            reservedForSellFee: SELL_TRANSACTION_FEE,
+            safetyBuffer: SAFETY_BUFFER,
+            totalReserved: TOTAL_REQUIRED_RESERVE,
+            safetyReduction: '85% of available',
+            maxCap: '0.25 SOL',
+            priorityFee: op.priorityFeeSol,
+            remainingAfterBuy: (parseFloat(buyableWallets[i].balance_sol) - op.solAmount).toFixed(6)
           }))
         });
 
         const buyResults = await pumpService.batchBuy(buyOperations, `token-buy-${bundler.id}`);
 
-        // Update child wallet balances from buy results
+        // Update child wallet balances from buy results and handle insufficient balance errors
         let successfulBuys = 0;
+        const balanceAdjustments = [];
+        
         for (let i = 0; i < buyResults.results.length; i++) {
           const result = buyResults.results[i];
           const wallet = buyableWallets[i];
@@ -589,9 +618,49 @@ class OrchestratorController {
               successfulBuys++;
             }
           } else {
+            // Check if it's an insufficient balance error with balance info
+            if (result.error?.includes('Insufficient balance') || result.error?.includes('INSUFFICIENT_BALANCE')) {
+              // Try to extract actual balance from error and update database
+              const actualBalance = this.extractActualBalanceFromError(result.error);
+              if (actualBalance !== null && actualBalance < parseFloat(wallet.balance_sol)) {
+                logger.warn('Database balance mismatch detected, scheduling adjustment', {
+                  walletPublicKey: wallet.public_key,
+                  databaseBalance: parseFloat(wallet.balance_sol),
+                  actualBalance: actualBalance,
+                  difference: parseFloat(wallet.balance_sol) - actualBalance
+                });
+                
+                balanceAdjustments.push({
+                  publicKey: wallet.public_key,
+                  newBalance: actualBalance
+                });
+              }
+            }
+            
             logger.error('Buy operation failed for child wallet', {
               walletPublicKey: wallet.public_key,
-              error: result.error
+              error: result.error,
+              databaseBalance: parseFloat(wallet.balance_sol)
+            });
+          }
+        }
+        
+        // Apply balance adjustments to correct database mismatches
+        for (const adjustment of balanceAdjustments) {
+          try {
+            await walletModel.updateChildWalletSolBalance(
+              adjustment.publicKey, 
+              adjustment.newBalance
+            );
+            
+            logger.info('Updated child wallet balance based on blockchain feedback', {
+              walletPublicKey: adjustment.publicKey,
+              newBalance: adjustment.newBalance
+            });
+          } catch (error) {
+            logger.error('Failed to update wallet balance', {
+              walletPublicKey: adjustment.publicKey,
+              error: error.message
             });
           }
         }
@@ -917,6 +986,36 @@ class OrchestratorController {
     });
 
     return distributions;
+  }
+
+  /**
+   * Extract actual balance from error message
+   * @param {string} errorMessage - Error message containing balance info
+   * @returns {number|null} Actual balance in SOL or null if not found
+   */
+  extractActualBalanceFromError(errorMessage) {
+    try {
+      // Look for pattern: "actual balance 0.048925568 SOL"
+      const match = errorMessage.match(/actual balance ([\d.]+) SOL/);
+      if (match) {
+        return parseFloat(match[1]);
+      }
+      
+      // Alternative pattern: "insufficient lamports 48925568, need 50972165"
+      const lamportsMatch = errorMessage.match(/insufficient lamports (\d+), need (\d+)/);
+      if (lamportsMatch) {
+        const actualLamports = parseInt(lamportsMatch[1]);
+        return actualLamports / 1000000000; // Convert lamports to SOL
+      }
+      
+      return null;
+    } catch (error) {
+      logger.warn('Could not extract balance from error message', { 
+        errorMessage, 
+        extractionError: error.message 
+      });
+      return null;
+    }
   }
 }
 
