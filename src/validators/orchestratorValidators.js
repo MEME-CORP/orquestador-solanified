@@ -173,6 +173,11 @@ const verifyInAppSolBalanceSchema = Joi.object({
   user_wallet_id: walletIdSchema
 });
 
+const verifySplBalancesSchema = Joi.object({
+  mintAddress: Joi.string().required(),
+  walletPublicKeys: Joi.array().items(Joi.string()).min(1).required()
+});
+
 // Validation middleware factory
 const validateRequest = (schema) => {
   return (req, res, next) => {
@@ -207,5 +212,6 @@ module.exports = {
   sellSplFromWalletSchema,
   transferToOwnerWalletSchema,
   verifyInAppSolBalanceSchema,
+  verifySplBalancesSchema,
   validateRequest
 };

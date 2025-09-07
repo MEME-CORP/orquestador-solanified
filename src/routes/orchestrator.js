@@ -10,7 +10,8 @@ const {
   sellCreatedTokenSchema,
   sellSplFromWalletSchema,
   transferToOwnerWalletSchema,
-  verifyInAppSolBalanceSchema
+  verifyInAppSolBalanceSchema,
+  verifySplBalancesSchema
 } = require('../validators/orchestratorValidators');
 
 /**
@@ -81,6 +82,16 @@ router.post(
   '/transfer-to-owner-wallet',
   validateRequest(transferToOwnerWalletSchema),
   orchestratorController.transferToOwnerWallet
+);
+
+/**
+ * Verify and update SPL balances for wallets after transaction settlement
+ * POST /api/orchestrator/verify-spl-balances
+ */
+router.post(
+  '/verify-spl-balances',
+  validateRequest(verifySplBalancesSchema),
+  orchestratorController.verifySplBalances
 );
 
 module.exports = router;

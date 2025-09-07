@@ -737,17 +737,16 @@ class OrchestratorController {
                    strategy: 'multi_step_recovery'
                  });
                  
-                 // Step 1: Try blockchain API fallback
+                 // Step 1: Try blockchain API fallback with improved timing
                  try {
-                   // Add delay to avoid overwhelming the API
-                   if (i > 0) {
-                     await new Promise(resolve => setTimeout(resolve, 500));
-                   }
+                   // Add progressive delay to allow blockchain settlement and reduce API load
+                   const delay = Math.min(1000 + (i * 500), 3000); // 1-3 seconds progressive delay
+                   await new Promise(resolve => setTimeout(resolve, delay));
                    
                    const actualSplBalance = await walletService.getSplBalance(
                      contractAddress, 
                      wallet.public_key,
-                     { maxRetries: 2, logProgress: true }
+                     { maxRetries: 3, logProgress: true }
                    );
                    
                    finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
@@ -773,9 +772,20 @@ class OrchestratorController {
                    // Step 2: If API fails, preserve existing balance and flag for later verification
                    const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
                    
-                   // Only update SPL balance if we have a meaningful existing balance
-                   // Otherwise, skip SPL update to prevent corrupting the database
-                   if (currentSplBalance > 0) {
+                   // Estimate SPL balance based on SOL spent if we have no existing balance
+                   if (currentSplBalance === 0 && buyOperations[i]?.solAmount > 0) {
+                     // Store transaction info for later verification instead of guessing balance
+                     logger.warn('Transaction successful but unable to verify SPL balance - flagging for verification', {
+                       walletPublicKey: wallet.public_key,
+                       signature: result.data.signature,
+                       solAmountSpent: buyOperations[i]?.solAmount,
+                       mintAddress: contractAddress,
+                       note: 'Balance verification needed - transaction confirmed but API unavailable'
+                     });
+                     
+                     // Don't update SPL balance - preserve zero until we can verify
+                     shouldUpdateSplBalance = false;
+                   } else if (currentSplBalance > 0) {
                      finalSplBalance = currentSplBalance;
                      logger.info('Preserving existing SPL balance to prevent data corruption', {
                        walletPublicKey: wallet.public_key,
@@ -939,6 +949,100 @@ class OrchestratorController {
         total_balance_spl: finalBundler.total_balance_spl
       });
     } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Verify and update SPL balances for wallets after transaction settlement
+   * POST /api/orchestrator/verify-spl-balances
+   */
+  async verifySplBalances(req, res, next) {
+    try {
+      const { mintAddress, walletPublicKeys } = req.body;
+
+      if (!mintAddress || !Array.isArray(walletPublicKeys) || walletPublicKeys.length === 0) {
+        throw new AppError('mintAddress and walletPublicKeys array are required', 400, 'MISSING_REQUIRED_FIELDS');
+      }
+
+      logger.info('Starting SPL balance verification', {
+        mintAddress,
+        walletCount: walletPublicKeys.length
+      });
+
+      const results = [];
+
+      for (let i = 0; i < walletPublicKeys.length; i++) {
+        const walletPublicKey = walletPublicKeys[i];
+        
+        try {
+          // Add delay between requests to avoid overwhelming the API
+          if (i > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+
+          const splBalance = await walletService.getSplBalance(
+            mintAddress,
+            walletPublicKey,
+            { maxRetries: 3, logProgress: true }
+          );
+
+          const finalBalance = splBalance.uiAmount || splBalance.balance || 0;
+
+          // Update the database
+          await walletModel.updateChildWalletSplBalance(walletPublicKey, finalBalance);
+
+          results.push({
+            walletPublicKey,
+            success: true,
+            balance: finalBalance,
+            updated: true
+          });
+
+          logger.info('SPL balance verified and updated', {
+            walletPublicKey,
+            balance: finalBalance,
+            mintAddress
+          });
+
+        } catch (error) {
+          results.push({
+            walletPublicKey,
+            success: false,
+            error: error.message,
+            updated: false
+          });
+
+          logger.error('Failed to verify SPL balance', {
+            walletPublicKey,
+            error: error.message,
+            mintAddress
+          });
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      const failureCount = results.length - successCount;
+
+      res.json({
+        success: true,
+        message: `SPL balance verification completed: ${successCount} successful, ${failureCount} failed`,
+        data: {
+          mintAddress,
+          results,
+          summary: {
+            total: results.length,
+            successful: successCount,
+            failed: failureCount
+          }
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error verifying SPL balances:', { 
+        error: error.message,
+        body: req.body 
+      });
       next(error);
     }
   }
