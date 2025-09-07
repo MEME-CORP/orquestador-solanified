@@ -248,17 +248,64 @@ class ApiResponseValidator {
   static extractTradeBalances(response) {
     try {
       const data = response?.data || response;
-      return {
+      
+      // Log the extraction process for debugging
+      logger.debug('Extracting trade balances', {
+        hasData: !!data,
+        hasPostBalances: !!data?.postBalances,
+        hasSolData: !!data?.postBalances?.sol,
+        hasSplData: !!data?.postBalances?.spl,
+        solData: data?.postBalances?.sol,
+        splData: data?.postBalances?.spl
+      });
+      
+      // Extract SPL balance with multiple fallbacks and detailed logging
+      let splBalance = 0;
+      if (data?.postBalances?.spl?.uiAmount !== undefined) {
+        splBalance = data.postBalances.spl.uiAmount;
+        if (splBalance === 0) {
+          logger.warn('API returned uiAmount as 0 for SPL balance', {
+            splData: data.postBalances.spl,
+            hasRawAmount: !!data.postBalances.spl.rawAmount,
+            rawAmount: data.postBalances.spl.rawAmount
+          });
+        }
+      } else if (data?.postBalances?.spl?.rawAmount) {
+        // If uiAmount is missing but rawAmount exists, try to convert
+        // Note: This is a fallback - normally uiAmount should be present
+        const rawAmount = parseFloat(data.postBalances.spl.rawAmount);
+        if (!isNaN(rawAmount) && rawAmount > 0) {
+          // Assume 6 decimal places for most tokens (this is a fallback)
+          splBalance = rawAmount / 1000000;
+          logger.warn('Using rawAmount as fallback for SPL balance', {
+            rawAmount: data.postBalances.spl.rawAmount,
+            calculatedUiAmount: splBalance
+          });
+        }
+      } else {
+        logger.warn('No SPL balance data found in API response', {
+          hasSplData: !!data?.postBalances?.spl,
+          splData: data?.postBalances?.spl
+        });
+      }
+      
+      const extracted = {
         solBalance: data?.postBalances?.sol?.balanceSol || 0,
         solBalanceLamports: data?.postBalances?.sol?.balanceLamports || '0',
-        splBalance: data?.postBalances?.spl?.uiAmount || 0,
+        splBalance: splBalance,
         splBalanceRaw: data?.postBalances?.spl?.rawAmount || '0',
         publicKey: data?.postBalances?.sol?.publicKey || 
                    data?.postBalances?.spl?.walletPublicKey || null,
         mintAddress: data?.postBalances?.spl?.mintAddress || null
       };
+      
+      logger.debug('Extracted trade balances', extracted);
+      return extracted;
     } catch (error) {
-      logger.error('Error extracting trade balances', { error: error.message });
+      logger.error('Error extracting trade balances', { 
+        error: error.message,
+        response: response 
+      });
       return { 
         solBalance: 0, 
         solBalanceLamports: '0',

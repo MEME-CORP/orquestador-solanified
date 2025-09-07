@@ -643,34 +643,81 @@ class OrchestratorController {
 
         const buyResults = await pumpService.batchBuy(buyOperations, `token-buy-${bundler.id}`);
 
-        // Update child wallet balances from buy results and handle insufficient balance errors
-        let successfulBuys = 0;
-        const balanceAdjustments = [];
-        
-        for (let i = 0; i < buyResults.results.length; i++) {
+         // Update child wallet balances from buy results and handle insufficient balance errors
+         let successfulBuys = 0;
+         const balanceAdjustments = [];
+         
+         logger.info('Processing buy results and updating balances', {
+           totalResults: buyResults.results.length,
+           successfulTransactions: buyResults.successful
+         });
+         
+         for (let i = 0; i < buyResults.results.length; i++) {
           const result = buyResults.results[i];
           const wallet = buyableWallets[i];
           
-          if (result.success && result.data) {
-            const balances = ApiResponseValidator.extractTradeBalances(result.data);
-            
-            logger.info('Processing buy result for child wallet', {
-              walletPublicKey: wallet.public_key,
-              solBalance: balances.solBalance,
-              splBalance: balances.splBalance,
-              mintAddress: balances.mintAddress,
-              signature: result.data?.signature
-            });
-            
-            if (balances.publicKey) {
-              await walletModel.updateChildWalletBalances(
-                wallet.public_key,
-                balances.solBalance,
-                balances.splBalance
-              );
-              successfulBuys++;
-            }
-          } else {
+           if (result.success && result.data) {
+             // Log the complete API response structure for debugging
+             logger.info('Complete buy API response for debugging', {
+               walletPublicKey: wallet.public_key,
+               fullResponse: {
+                 signature: result.data?.signature,
+                 confirmed: result.data?.confirmed,
+                 postBalances: result.data?.postBalances,
+                 hasPostBalances: !!result.data?.postBalances,
+                 solData: result.data?.postBalances?.sol,
+                 splData: result.data?.postBalances?.spl
+               }
+             });
+             
+             const balances = ApiResponseValidator.extractTradeBalances(result.data);
+             
+             logger.info('Processing buy result for child wallet', {
+               walletPublicKey: wallet.public_key,
+               solBalance: balances.solBalance,
+               splBalance: balances.splBalance,
+               mintAddress: balances.mintAddress,
+               signature: result.data?.signature,
+               extractionDebug: {
+                 originalSplUiAmount: result.data?.postBalances?.spl?.uiAmount,
+                 originalSplRawAmount: result.data?.postBalances?.spl?.rawAmount,
+                 extractedSplBalance: balances.splBalance,
+                 splDataExists: !!result.data?.postBalances?.spl
+               }
+             });
+             
+             if (balances.publicKey) {
+               // Additional validation: if SPL balance is 0 but transaction was successful,
+               // log this for investigation but still update the wallet
+               if (balances.splBalance === 0 && result.data?.signature) {
+                 logger.warn('Successful buy transaction but SPL balance is 0', {
+                   walletPublicKey: wallet.public_key,
+                   signature: result.data.signature,
+                   solAmountSpent: buyOperations[i]?.solAmount,
+                   postBalancesSpl: result.data?.postBalances?.spl,
+                   note: 'This wallet may have received tokens that are not reflected in the API response'
+                 });
+                 
+                 // Still update the wallet with the SOL balance change
+                 // For SPL balance, we'll keep the existing balance since API shows 0
+                 // but user confirmed they received tokens
+                 const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
+                 await walletModel.updateChildWalletBalances(
+                   wallet.public_key,
+                   balances.solBalance,
+                   currentSplBalance // Keep existing SPL balance if API returns 0
+                 );
+               } else {
+                 // Normal case - update both balances
+                 await walletModel.updateChildWalletBalances(
+                   wallet.public_key,
+                   balances.solBalance,
+                   balances.splBalance
+                 );
+               }
+               successfulBuys++;
+             }
+           } else {
             // Check if it's an insufficient balance error with balance info
             if (result.error?.includes('Insufficient balance') || result.error?.includes('INSUFFICIENT_BALANCE')) {
               // Try to extract actual balance from error and update database
@@ -718,16 +765,46 @@ class OrchestratorController {
           }
         }
         
-        logger.info('Batch buy operations summary', {
-          totalWallets: buyableWallets.length,
-          successfulBuys,
-          failedBuys: buyableWallets.length - successfulBuys
-        });
+         logger.info('Batch buy operations summary', {
+           totalWallets: buyableWallets.length,
+           successfulBuys,
+           failedBuys: buyableWallets.length - successfulBuys
+         });
 
-        logger.info('Buy operations completed', {
-          successful: buyResults.successful,
-          failed: buyResults.failed
-        });
+         // Post-processing: Verify SPL balances for wallets that showed 0 but had successful transactions
+         const walletsWithZeroSpl = [];
+         for (let i = 0; i < buyResults.results.length; i++) {
+           const result = buyResults.results[i];
+           const wallet = buyableWallets[i];
+           
+           if (result.success && result.data?.signature) {
+             const balances = ApiResponseValidator.extractTradeBalances(result.data);
+             if (balances.splBalance === 0) {
+               walletsWithZeroSpl.push({
+                 publicKey: wallet.public_key,
+                 signature: result.data.signature,
+                 solAmountSpent: buyOperations[i]?.solAmount
+               });
+             }
+           }
+         }
+
+         if (walletsWithZeroSpl.length > 0) {
+           logger.warn('Found wallets with successful transactions but zero SPL balance in API response', {
+             count: walletsWithZeroSpl.length,
+             wallets: walletsWithZeroSpl,
+             note: 'These wallets may have received tokens that are not reflected in the API response'
+           });
+           
+           // TODO: Consider adding a blockchain balance verification step here
+           // For now, we log this for monitoring and investigation
+         }
+
+         logger.info('Buy operations completed', {
+           successful: buyResults.successful,
+           failed: buyResults.failed,
+           walletsWithZeroSplInResponse: walletsWithZeroSpl.length
+         });
       }
 
       // Get final bundler state
