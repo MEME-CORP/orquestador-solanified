@@ -98,43 +98,123 @@ class WalletService {
   }
 
   /**
-   * Get SOL balance for a wallet
+   * Get SOL balance for a wallet with automatic retry on rate limits
    * @param {string} publicKey - Wallet public key
+   * @param {Object} options - Options for retry behavior
+   * @param {number} options.maxRetries - Maximum number of retries (default: 3)
+   * @param {boolean} options.logProgress - Whether to log retry progress (default: true)
    * @returns {Promise<Object>} Balance information
    */
-  async getSolBalance(publicKey) {
-    try {
-      logger.info('Getting SOL balance', { publicKey });
+  async getSolBalance(publicKey, options = {}) {
+    const { maxRetries = 3, logProgress = true } = options;
+    let lastError;
 
-      const response = await apiClient.get(`/api/v1/wallet/${publicKey}/balance/sol`);
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      try {
+        if (logProgress) {
+          logger.info('Getting SOL balance', { 
+            publicKey, 
+            attempt: attempt > 1 ? `${attempt}/${maxRetries + 1}` : undefined 
+          });
+        }
 
-      if (!ApiResponseValidator.validateSolBalanceResponse(response)) {
-        throw new AppError('Invalid balance response format', 502, 'BALANCE_INVALID_RESPONSE');
-      }
+        const response = await apiClient.get(`/api/v1/wallet/${publicKey}/balance/sol`);
 
-      return response.data;
-    } catch (error) {
-      logger.error('Error getting SOL balance:', { publicKey, error: error.message });
-      
-      if (error instanceof AppError) {
-        throw error;
+        if (!ApiResponseValidator.validateSolBalanceResponse(response)) {
+          throw new AppError('Invalid balance response format', 502, 'BALANCE_INVALID_RESPONSE');
+        }
+
+        // Success - log if this was a retry
+        if (attempt > 1 && logProgress) {
+          logger.info('SOL balance retrieved successfully after retry', { 
+            publicKey, 
+            attempt,
+            balance: response.data.balanceSol
+          });
+        }
+
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        
+        // Handle 404 - wallet not found or has no balance (don't retry)
+        if (error.response?.status === 404) {
+          return {
+            publicKey,
+            balanceSol: 0,
+            balanceLamports: '0'
+          };
+        }
+
+        // Check if this is a rate limit error that we should handle locally
+        const isRateLimit = this.isRateLimitError(error);
+        const shouldRetryLocally = isRateLimit && attempt <= maxRetries;
+
+        if (shouldRetryLocally) {
+          const delay = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500; // 1s, 2s, 4s + jitter
+          
+          if (logProgress) {
+            logger.warn(`Rate limit hit getting SOL balance, retrying in ${delay}ms`, {
+              publicKey,
+              attempt,
+              maxRetries: maxRetries + 1,
+              error: error.response?.data?.error || error.message
+            });
+          }
+          
+          await this.sleep(delay);
+          continue; // Retry the loop
+        }
+
+        // If we're here, either it's not a rate limit error or we've exhausted retries
+        break;
       }
-      
-      // Handle 404 - wallet not found or has no balance
-      if (error.response?.status === 404) {
-        return {
-          publicKey,
-          balanceSol: 0,
-          balanceLamports: '0'
-        };
-      }
-      
-      throw new AppError(
-        'Failed to get balance from external API',
-        502,
-        'EXTERNAL_BALANCE_API_ERROR'
-      );
     }
+
+    // All retries exhausted or non-retryable error
+    logger.error('Error getting SOL balance after all retries:', { 
+      publicKey, 
+      attempts: maxRetries + 1,
+      error: lastError.message 
+    });
+    
+    if (lastError instanceof AppError) {
+      throw lastError;
+    }
+    
+    throw new AppError(
+      'Failed to get balance from external API after retries',
+      502,
+      'EXTERNAL_BALANCE_API_ERROR'
+    );
+  }
+
+  /**
+   * Check if error is a rate limit error
+   * @param {Error} error - The error to check
+   * @returns {boolean} True if it's a rate limit error
+   */
+  isRateLimitError(error) {
+    const status = error.response?.status;
+    const errorMessage = error.response?.data?.error || error.message || '';
+    
+    return (
+      status === 400 && (
+        errorMessage.includes('Rate limit exceeded') ||
+        errorMessage.includes('rate limit') ||
+        errorMessage.includes('too many requests') ||
+        errorMessage.includes('max 4 req/s')
+      )
+    ) || status === 429;
+  }
+
+  /**
+   * Sleep utility function
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise} Promise that resolves after the delay
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**

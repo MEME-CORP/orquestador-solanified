@@ -5,7 +5,7 @@ const ApiResponseValidator = require('../utils/apiResponseValidator');
 
 class SolService {
   /**
-   * Transfer SOL using advanced transfer endpoint
+   * Transfer SOL using advanced transfer endpoint with automatic retry
    * @param {Object} transferData - Transfer parameters
    * @param {string} transferData.fromPublicKey - Sender public key
    * @param {string} transferData.toPublicKey - Recipient public key
@@ -15,57 +15,139 @@ class SolService {
    * @param {number} [transferData.microLamports] - Micro-lamports per compute unit
    * @param {string} [transferData.commitment] - Confirmation level
    * @param {string} [idempotencyKey] - Idempotency key for retry safety
+   * @param {Object} [options] - Retry options
+   * @param {number} [options.maxRetries] - Maximum retries (default: 3)
    * @returns {Promise<Object>} Transfer result
    */
-  async transfer(transferData, idempotencyKey = null) {
-    try {
-      logger.info('Initiating SOL transfer', {
-        from: transferData.fromPublicKey,
-        to: transferData.toPublicKey,
-        amount: transferData.amountSol,
-        idempotencyKey
-      });
-
-      // Validate minimum balance requirement (0.0001 SOL reserved)
-      const MIN_RESERVE = 0.0001;
-      if (transferData.amountSol < MIN_RESERVE) {
-        throw new AppError(
-          `Transfer amount must be at least ${MIN_RESERVE} SOL`,
-          400,
-          'AMOUNT_TOO_SMALL'
-        );
-      }
-
-      const config = idempotencyKey ? { idempotencyKey } : {};
-      const response = await apiClient.post('/api/v1/sol/advanced-transfer', transferData, config);
-
-      if (!ApiResponseValidator.validateSolTransferResponse(response)) {
-        throw new AppError('Invalid transfer response format', 502, 'TRANSFER_INVALID_RESPONSE');
-      }
-
-      logger.info('SOL transfer completed', {
-        signature: response.data.signature,
-        confirmed: response.data.confirmed
-      });
-
-      return response.data;
-    } catch (error) {
-      logger.error('Error in SOL transfer:', {
-        from: transferData.fromPublicKey,
-        to: transferData.toPublicKey,
-        error: error.message
-      });
-      
-      if (error instanceof AppError) {
-        throw error;
-      }
-      
+  async transfer(transferData, idempotencyKey = null, options = {}) {
+    const { maxRetries = 3 } = options;
+    
+    // Validate minimum balance requirement (0.0001 SOL reserved)
+    const MIN_RESERVE = 0.0001;
+    if (transferData.amountSol < MIN_RESERVE) {
       throw new AppError(
-        'Failed to execute SOL transfer',
-        502,
-        'EXTERNAL_TRANSFER_API_ERROR'
+        `Transfer amount must be at least ${MIN_RESERVE} SOL`,
+        400,
+        'AMOUNT_TOO_SMALL'
       );
     }
+
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      try {
+        logger.info('Initiating SOL transfer', {
+          from: transferData.fromPublicKey,
+          to: transferData.toPublicKey,
+          amount: transferData.amountSol,
+          idempotencyKey,
+          attempt: attempt > 1 ? `${attempt}/${maxRetries + 1}` : undefined
+        });
+
+        const config = idempotencyKey ? { idempotencyKey } : {};
+        const response = await apiClient.post('/api/v1/sol/advanced-transfer', transferData, config);
+
+        if (!ApiResponseValidator.validateSolTransferResponse(response)) {
+          throw new AppError('Invalid transfer response format', 502, 'TRANSFER_INVALID_RESPONSE');
+        }
+
+        // Success - log if this was a retry
+        if (attempt > 1) {
+          logger.info('SOL transfer completed successfully after retry', {
+            signature: response.data.signature,
+            confirmed: response.data.confirmed,
+            attempt
+          });
+        } else {
+          logger.info('SOL transfer completed', {
+            signature: response.data.signature,
+            confirmed: response.data.confirmed
+          });
+        }
+
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        
+        // Don't retry validation errors or insufficient balance errors
+        if (error instanceof AppError && (
+          error.code === 'AMOUNT_TOO_SMALL' ||
+          error.code === 'TRANSFER_INVALID_RESPONSE' ||
+          error.message.includes('Insufficient balance')
+        )) {
+          break;
+        }
+
+        // Check if this is a rate limit error and we should retry
+        const isRateLimit = this.isRateLimitError(error);
+        const shouldRetryLocally = (isRateLimit || error.response?.status >= 500) && attempt <= maxRetries;
+
+        if (shouldRetryLocally) {
+          const delay = Math.pow(2, attempt - 1) * 2000 + Math.random() * 1000; // 2s, 4s, 8s + jitter
+          
+          logger.warn(`Transfer failed, retrying in ${delay}ms`, {
+            from: transferData.fromPublicKey,
+            to: transferData.toPublicKey,
+            attempt,
+            maxRetries: maxRetries + 1,
+            error: error.response?.data?.error || error.message,
+            isRateLimit
+          });
+          
+          await this.sleep(delay);
+          continue;
+        }
+
+        // Non-retryable error or max retries reached
+        break;
+      }
+    }
+
+    // All retries exhausted
+    logger.error('Error in SOL transfer after all retries:', {
+      from: transferData.fromPublicKey,
+      to: transferData.toPublicKey,
+      attempts: maxRetries + 1,
+      error: lastError.message
+    });
+    
+    if (lastError instanceof AppError) {
+      throw lastError;
+    }
+    
+    throw new AppError(
+      'Failed to execute SOL transfer after retries',
+      502,
+      'EXTERNAL_TRANSFER_API_ERROR'
+    );
+  }
+
+  /**
+   * Check if error is a rate limit error
+   * @param {Error} error - The error to check
+   * @returns {boolean} True if it's a rate limit error
+   */
+  isRateLimitError(error) {
+    const status = error.response?.status;
+    const errorMessage = error.response?.data?.error || error.message || '';
+    
+    return (
+      status === 400 && (
+        errorMessage.includes('Rate limit exceeded') ||
+        errorMessage.includes('rate limit') ||
+        errorMessage.includes('too many requests') ||
+        errorMessage.includes('max 4 req/s')
+      )
+    ) || status === 429;
+  }
+
+  /**
+   * Sleep utility function
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise} Promise that resolves after the delay
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**

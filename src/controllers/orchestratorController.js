@@ -289,14 +289,41 @@ class OrchestratorController {
         // Continue with partial success - reconciliation can handle this later
       }
 
-      // Update user balance
-      const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
-      await userModel.updateSolBalance(user_wallet_id, newUserBalance.balanceSol);
+      // Update user balance (with rate limiting)
+      logger.info(`Rate limiting: waiting 300ms before user balance check`);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      try {
+        const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
+        await userModel.updateSolBalance(user_wallet_id, newUserBalance.balanceSol);
+      } catch (balanceError) {
+        logger.error('Failed to update user balance after mother wallet funding', {
+          userWalletId: user_wallet_id,
+          error: balanceError.message
+        });
+      }
 
-      // Update mother wallet balances
-      for (const wallet of bundlerData.allocated_mother_wallets) {
-        const motherBalance = await walletService.getSolBalance(wallet.public_key);
-        await walletModel.updateMotherWalletBalance(wallet.id, motherBalance.balanceSol);
+      // Update mother wallet balances (with rate limiting)
+      for (let i = 0; i < bundlerData.allocated_mother_wallets.length; i++) {
+        const wallet = bundlerData.allocated_mother_wallets[i];
+        
+        // Add delay between mother wallet balance checks
+        if (i > 0) {
+          logger.info(`Rate limiting: waiting 300ms before next mother wallet balance check`);
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        
+        try {
+          const motherBalance = await walletService.getSolBalance(wallet.public_key);
+          await walletModel.updateMotherWalletBalance(wallet.id, motherBalance.balanceSol);
+        } catch (balanceError) {
+          logger.error('Failed to update mother wallet balance after funding', {
+            motherWalletId: wallet.id,
+            publicKey: wallet.public_key,
+            error: balanceError.message
+          });
+          // Continue with other wallets
+        }
       }
 
       // Fan out to child wallets
@@ -332,24 +359,50 @@ class OrchestratorController {
               `${requestId}-child-${motherWallet.id}`
             );
 
-            // Update child wallet balances
+            // Update child wallet balances with rate limiting
             for (let i = 0; i < childTransfers.length; i++) {
               const transfer = childTransfers[i];
               const result = childResults.results[i];
               
               if (result.success) {
-                const childBalance = await walletService.getSolBalance(transfer.toPublicKey);
-                await walletModel.updateChildWalletSolBalance(
-                  transfer.toPublicKey,
-                  childBalance.balanceSol
-                );
+                // Add delay between balance checks to respect API rate limits (4 req/s max)
+                if (i > 0) {
+                  logger.info(`Rate limiting: waiting 300ms before next balance check`);
+                  await new Promise(resolve => setTimeout(resolve, 300)); // 300ms = ~3.3 req/s
+                }
+                
+                try {
+                  const childBalance = await walletService.getSolBalance(transfer.toPublicKey);
+                  await walletModel.updateChildWalletSolBalance(
+                    transfer.toPublicKey,
+                    childBalance.balanceSol
+                  );
+                } catch (balanceError) {
+                  logger.error('Failed to update child wallet balance after transfer', {
+                    publicKey: transfer.toPublicKey,
+                    error: balanceError.message
+                  });
+                  // Continue with other wallets even if one balance update fails
+                }
               }
             }
           }
 
-          // Update mother wallet balance after distributions
-          const updatedMotherBalance = await walletService.getSolBalance(motherWallet.public_key);
-          await walletModel.updateMotherWalletBalance(motherWallet.id, updatedMotherBalance.balanceSol);
+          // Update mother wallet balance after distributions (with rate limiting)
+          logger.info(`Rate limiting: waiting 300ms before mother wallet balance check`);
+          await new Promise(resolve => setTimeout(resolve, 300)); // Additional delay for mother wallet
+          
+          try {
+            const updatedMotherBalance = await walletService.getSolBalance(motherWallet.public_key);
+            await walletModel.updateMotherWalletBalance(motherWallet.id, updatedMotherBalance.balanceSol);
+          } catch (balanceError) {
+            logger.error('Failed to update mother wallet balance after child distributions', {
+              motherWalletId: motherWallet.id,
+              publicKey: motherWallet.public_key,
+              error: balanceError.message
+            });
+            // Continue with bundler creation even if mother wallet balance update fails
+          }
 
         } catch (error) {
           logger.error('Error distributing to child wallets', {
