@@ -326,20 +326,7 @@ class ApiResponseValidator {
     try {
       const data = response?.data || response;
       
-      // Debug logging to understand the actual response structure
-      logger.info('🔍 [API_RESPONSE_VALIDATOR] Debugging token creation response structure', {
-        hasData: !!data,
-        hasPostBalances: !!data?.postBalances,
-        hasSolBalance: !!data?.postBalances?.sol,
-        hasSplBalance: !!data?.postBalances?.spl,
-        solBalanceValue: data?.postBalances?.sol?.balanceSol,
-        splUiAmountValue: data?.postBalances?.spl?.uiAmount,
-        splRawAmountValue: data?.postBalances?.spl?.rawAmount,
-        fullPostBalances: data?.postBalances,
-        signature: data?.signature
-      });
-
-      const extractedBalances = {
+      return {
         solBalance: data?.postBalances?.sol?.balanceSol || 0,
         solBalanceLamports: data?.postBalances?.sol?.balanceLamports || '0',
         splBalance: data?.postBalances?.spl?.uiAmount || 0,
@@ -352,13 +339,6 @@ class ApiResponseValidator {
         signature: data?.signature || null,
         confirmed: data?.confirmed || false
       };
-
-      logger.info('✅ [API_RESPONSE_VALIDATOR] Extracted creation balances', {
-        extractedBalances,
-        splBalanceSource: data?.postBalances?.spl?.uiAmount ? 'postBalances.spl.uiAmount' : 'fallback_zero'
-      });
-
-      return extractedBalances;
     } catch (error) {
       logger.error('Error extracting creation balances', { error: error.message });
       return { 

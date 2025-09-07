@@ -1019,17 +1019,75 @@ class OrchestratorController {
       // Get final bundler state
       const finalBundler = await bundlerModel.getLatestActiveBundler(user_wallet_id);
 
+      // FINAL STEP: Verify user SPL balance at the end of the whole flow
+      // By now, the blockchain should have had enough time to settle all transactions
+      logger.info('🔍 [FINAL_SPL_VERIFICATION] Verifying user SPL balance at end of flow', {
+        user_wallet_id,
+        contractAddress,
+        userPublicKey: user.in_app_public_key,
+        currentSplBalance: user.balance_spl,
+        strategy: 'end_of_flow_verification'
+      });
+
+      try {
+        // Add extra delay to ensure blockchain settlement
+        await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay
+        
+        const finalUserSplBalance = await walletService.getSplBalance(
+          contractAddress,
+          user.in_app_public_key,
+          { maxRetries: 5, logProgress: true } // More retries for final verification
+        );
+
+        const verifiedUserBalance = finalUserSplBalance.uiAmount || finalUserSplBalance.balance || 0;
+
+        if (verifiedUserBalance > 0) {
+          // Update user SPL balance with the real blockchain value
+          await userModel.updateSplBalance(user_wallet_id, verifiedUserBalance);
+          
+          logger.info('✅ [FINAL_SPL_VERIFICATION] User SPL balance updated with real blockchain value', {
+            user_wallet_id,
+            contractAddress,
+            previousBalance: finalSplBalance,
+            verifiedBalance: verifiedUserBalance,
+            balanceSource: 'end_of_flow_blockchain_api',
+            improvement: verifiedUserBalance > finalSplBalance ? 'significant_improvement' : 'minor_adjustment'
+          });
+          
+          // Update the response to reflect the real balance
+          finalSplBalance = verifiedUserBalance;
+        } else {
+          logger.warn('⚠️ [FINAL_SPL_VERIFICATION] Blockchain API still returns 0 - keeping estimated balance', {
+            user_wallet_id,
+            contractAddress,
+            estimatedBalance: finalSplBalance,
+            note: 'User may need to wait longer or check manually'
+          });
+        }
+
+      } catch (finalVerificationError) {
+        logger.error('❌ [FINAL_SPL_VERIFICATION] Final verification failed - keeping estimated balance', {
+          user_wallet_id,
+          contractAddress,
+          error: finalVerificationError.message,
+          estimatedBalance: finalSplBalance,
+          note: 'This is acceptable - child wallets were updated successfully'
+        });
+      }
+
       logger.info('Token creation and buying completed', {
         symbol,
         contractAddress,
-        bundler_id: bundler.id
+        bundler_id: bundler.id,
+        final_user_spl_balance: finalSplBalance
       });
 
       res.json({
         contract_address: contractAddress,
         token_name: symbol,
         bundler_id: bundler.id,
-        total_balance_spl: finalBundler.total_balance_spl
+        total_balance_spl: finalBundler.total_balance_spl,
+        user_spl_balance: finalSplBalance
       });
     } catch (error) {
       next(error);
