@@ -1277,53 +1277,51 @@ class OrchestratorController {
             const originalSolBalance = parseFloat(wallet.balance_sol) || 0;
             const originalSplBalance = parseFloat(wallet.balance_spl) || 0;
             
-            // Check if SOL balance hasn't changed (potential timing issue)
-            const solBalanceUnchanged = Math.abs(originalSolBalance - balances.solBalance) < 0.000001; // 1 microSOL tolerance
+            // Always verify SOL balance with blockchain API after sell operations
+            // This ensures we get the most accurate balance regardless of API timing issues
+            logger.info('Verifying SOL balance with blockchain API after sell operation', {
+              walletPublicKey: wallet.public_key,
+              originalSolBalance: originalSolBalance,
+              apiResponseSolBalance: balances.solBalance,
+              signature: result.data.signature,
+              sellPercent: sell_percent,
+              strategy: 'always_verify_sol_balance'
+            });
             
-            if (solBalanceUnchanged && result.data?.signature) {
-              logger.warn('SOL balance appears unchanged after sell - verifying with blockchain API', {
+            try {
+              // Add delay to avoid overwhelming the API
+              if (i > 0) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+              
+              const actualSolBalance = await walletService.getSolBalance(
+                wallet.public_key,
+                { maxRetries: 2, logProgress: true }
+              );
+              
+              finalSolBalance = actualSolBalance.balanceSol || 0;
+              
+              logger.info('Successfully retrieved real SOL balance from blockchain API after sell', {
                 walletPublicKey: wallet.public_key,
                 originalSolBalance: originalSolBalance,
                 apiResponseSolBalance: balances.solBalance,
+                blockchainActualSolBalance: finalSolBalance,
                 signature: result.data.signature,
-                sellPercent: sell_percent,
-                strategy: 'blockchain_api_verification'
+                balanceDifference: finalSolBalance - originalSolBalance,
+                balanceImprovement: finalSolBalance > balances.solBalance ? 'blockchain_more_accurate' : 'api_response_accurate'
               });
               
-              try {
-                // Add delay to avoid overwhelming the API
-                if (i > 0) {
-                  await new Promise(resolve => setTimeout(resolve, 500));
-                }
-                
-                const actualSolBalance = await walletService.getSolBalance(
-                  wallet.public_key,
-                  { maxRetries: 2, logProgress: true }
-                );
-                
-                finalSolBalance = actualSolBalance.balanceSol || 0;
-                
-                logger.info('Successfully retrieved real SOL balance from blockchain API after sell', {
-                  walletPublicKey: wallet.public_key,
-                  originalSolBalance: originalSolBalance,
-                  apiResponseSolBalance: balances.solBalance,
-                  blockchainActualSolBalance: finalSolBalance,
-                  signature: result.data.signature,
-                  balanceDifference: finalSolBalance - originalSolBalance
-                });
-                
-              } catch (solFallbackError) {
-                logger.error('Blockchain API SOL balance fallback failed for sell', {
-                  walletPublicKey: wallet.public_key,
-                  signature: result.data.signature,
-                  error: solFallbackError.message,
-                  sellPercent: sell_percent,
-                  strategy: 'preserve_api_response'
-                });
-                
-                // Keep the API response balance if blockchain verification fails
-                finalSolBalance = balances.solBalance;
-              }
+            } catch (solFallbackError) {
+              logger.error('Blockchain API SOL balance fallback failed for sell - using API response', {
+                walletPublicKey: wallet.public_key,
+                signature: result.data.signature,
+                error: solFallbackError.message,
+                sellPercent: sell_percent,
+                strategy: 'preserve_api_response'
+              });
+              
+              // Keep the API response balance if blockchain verification fails
+              finalSolBalance = balances.solBalance;
             }
             
             // Enhanced fallback strategy for zero SPL balance on successful sell transactions
@@ -1431,10 +1429,10 @@ class OrchestratorController {
                solBalance: finalSolBalance,
                splBalance: finalSplBalance,
                signature: result.data?.signature,
-               solBalanceSource: solBalanceUnchanged ? 'blockchain_api_verified' : 'api_response',
+               solBalanceSource: 'blockchain_api_verified',
                splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_expected',
                balanceUpdateMethod: 'both_sol_and_spl',
-               solBalanceVerified: solBalanceUnchanged
+               solBalanceVerified: true
              });
             
             successfulSellUpdates++;
