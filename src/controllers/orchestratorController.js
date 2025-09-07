@@ -1019,21 +1019,184 @@ class OrchestratorController {
         `token-sell-${bundler.id}-${sell_percent}`
       );
 
-      // Update child wallet balances from sell results
+      // Update child wallet balances from sell results with protection against API issues
+      let successfulSellUpdates = 0;
+      const sellWalletsNeedingVerification = [];
+      
       for (let i = 0; i < sellResults.results.length; i++) {
         const result = sellResults.results[i];
         const wallet = sellableWallets[i];
         
         if (result.success && result.data) {
+          // Log the complete sell API response for debugging
+          logger.info('Complete sell API response for debugging', {
+            walletPublicKey: wallet.public_key,
+            fullResponse: {
+              signature: result.data?.signature,
+              confirmed: result.data?.confirmed,
+              postBalances: result.data?.postBalances,
+              hasPostBalances: !!result.data?.postBalances,
+              solData: result.data?.postBalances?.sol,
+              splData: result.data?.postBalances?.spl
+            }
+          });
+          
           const balances = ApiResponseValidator.extractTradeBalances(result.data);
+          
+          logger.info('Processing sell result for child wallet', {
+            walletPublicKey: wallet.public_key,
+            solBalance: balances.solBalance,
+            splBalance: balances.splBalance,
+            mintAddress: balances.mintAddress,
+            signature: result.data?.signature,
+            extractionDebug: {
+              originalSplUiAmount: result.data?.postBalances?.spl?.uiAmount,
+              originalSplRawAmount: result.data?.postBalances?.spl?.rawAmount,
+              extractedSplBalance: balances.splBalance,
+              splDataExists: !!result.data?.postBalances?.spl
+            }
+          });
+          
           if (balances.publicKey) {
-            await walletModel.updateChildWalletBalances(
-              wallet.public_key,
-              balances.solBalance,
-              balances.splBalance
-            );
+            let finalSplBalance = balances.splBalance;
+            let shouldUpdateSplBalance = true;
+            
+            // Enhanced fallback strategy for zero SPL balance on successful sell transactions
+            if (balances.splBalance === 0 && result.data?.signature) {
+              logger.warn('Successful sell transaction but SPL balance is 0 - implementing recovery strategy', {
+                walletPublicKey: wallet.public_key,
+                signature: result.data.signature,
+                sellPercent: sell_percent,
+                postBalancesSpl: result.data?.postBalances?.spl,
+                mintAddress: token.contract_address,
+                strategy: 'multi_step_recovery'
+              });
+              
+              // Step 1: Try blockchain API fallback
+              try {
+                // Add delay to avoid overwhelming the API
+                if (i > 0) {
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                
+                const actualSplBalance = await walletService.getSplBalance(
+                  token.contract_address, 
+                  wallet.public_key,
+                  { maxRetries: 2, logProgress: true }
+                );
+                
+                finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+                
+                logger.info('Successfully retrieved SPL balance from blockchain API for sell', {
+                  walletPublicKey: wallet.public_key,
+                  apiResponseBalance: balances.splBalance,
+                  blockchainActualBalance: finalSplBalance,
+                  signature: result.data.signature,
+                  mintAddress: token.contract_address
+                });
+                
+              } catch (fallbackError) {
+                logger.error('Blockchain API fallback failed for sell - implementing protective strategy', {
+                  walletPublicKey: wallet.public_key,
+                  mintAddress: token.contract_address,
+                  signature: result.data.signature,
+                  error: fallbackError.message,
+                  sellPercent: sell_percent,
+                  strategy: 'preserve_existing_balance'
+                });
+                
+                // Step 2: If API fails, calculate expected remaining balance or preserve existing
+                const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
+                
+                // For sell operations, we can estimate the remaining balance
+                if (currentSplBalance > 0 && sell_percent < 100) {
+                  // Calculate expected remaining balance based on sell percentage
+                  const expectedRemaining = currentSplBalance * (1 - sell_percent / 100);
+                  finalSplBalance = expectedRemaining;
+                  
+                  logger.info('Calculated expected remaining SPL balance for sell', {
+                    walletPublicKey: wallet.public_key,
+                    originalBalance: currentSplBalance,
+                    sellPercent: sell_percent,
+                    expectedRemaining: expectedRemaining,
+                    signature: result.data.signature
+                  });
+                } else if (sell_percent === 100) {
+                  // For 100% sell, balance should be 0, but we'll verify this later
+                  finalSplBalance = 0;
+                  
+                  logger.info('100% sell - setting SPL balance to 0', {
+                    walletPublicKey: wallet.public_key,
+                    signature: result.data.signature
+                  });
+                } else {
+                  // Preserve existing balance and flag for verification
+                  finalSplBalance = currentSplBalance;
+                  shouldUpdateSplBalance = false;
+                  
+                  logger.warn('Skipping SPL balance update for sell to prevent corruption', {
+                    walletPublicKey: wallet.public_key,
+                    signature: result.data.signature,
+                    sellPercent: sell_percent,
+                    note: 'Manual verification may be needed'
+                  });
+                  
+                  // Track for verification
+                  sellWalletsNeedingVerification.push({
+                    publicKey: wallet.public_key,
+                    signature: result.data.signature,
+                    sellPercent: sell_percent,
+                    mintAddress: token.contract_address,
+                    timestamp: new Date().toISOString(),
+                    operation: 'sell'
+                  });
+                }
+              }
+            }
+            
+            // Update wallet balances with protective logic
+            if (shouldUpdateSplBalance) {
+              await walletModel.updateChildWalletBalances(
+                wallet.public_key,
+                balances.solBalance,
+                finalSplBalance
+              );
+              
+              logger.info('Child wallet balances updated after sell', {
+                walletPublicKey: wallet.public_key,
+                solBalance: balances.solBalance,
+                splBalance: finalSplBalance,
+                signature: result.data?.signature
+              });
+            } else {
+              // Update only SOL balance, preserve existing SPL balance
+              await walletModel.updateChildWalletSolBalance(
+                wallet.public_key,
+                balances.solBalance
+              );
+              
+              logger.info('Updated SOL balance only after sell, preserved existing SPL balance', {
+                walletPublicKey: wallet.public_key,
+                solBalance: balances.solBalance,
+                signature: result.data?.signature,
+                note: 'SPL balance preserved due to API issues'
+              });
+            }
+            
+            successfulSellUpdates++;
           }
         }
+      }
+      
+      // Log sell protection summary
+      if (sellWalletsNeedingVerification.length > 0) {
+        logger.warn('Sell operations with SPL balance protection applied', {
+          totalSellOperations: sellResults.results.length,
+          successfulUpdates: successfulSellUpdates,
+          walletsNeedingVerification: sellWalletsNeedingVerification.length,
+          verificationDetails: sellWalletsNeedingVerification,
+          note: 'Some sell operations may need delayed verification due to API issues'
+        });
       }
 
       // If 100% sell, transfer all SOL back and deactivate bundler
@@ -1350,6 +1513,7 @@ class OrchestratorController {
    /**
     * Verify and fix SPL balances for specific wallets
     * This method can be called separately to fix SPL balances that were missed due to API issues
+    * Supports both buy and sell operations
     * @param {Array} walletVerifications - Array of wallet verification objects
     * @param {string} mintAddress - Token contract address
     * @returns {Promise<Object>} Verification results
@@ -1378,6 +1542,8 @@ class OrchestratorController {
            logger.info('Verifying SPL balance for wallet', {
              walletPublicKey: walletInfo.publicKey,
              originalSignature: walletInfo.signature,
+             operation: walletInfo.operation || 'buy',
+             sellPercent: walletInfo.sellPercent,
              mintAddress
            });
 
