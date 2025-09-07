@@ -457,10 +457,33 @@ class OrchestratorController {
 
       logger.info('Creating and buying token', { user_wallet_id, symbol, dev_buy_amount });
 
+      // Validate input parameters
+      if (!name || !symbol || !description) {
+        throw new AppError('Missing required token parameters: name, symbol, description', 400, 'MISSING_TOKEN_PARAMS');
+      }
+
+      if (!logo_base64) {
+        throw new AppError('Logo image is required', 400, 'MISSING_LOGO');
+      }
+
+      const devBuyAmountNum = parseFloat(dev_buy_amount);
+      if (isNaN(devBuyAmountNum) || devBuyAmountNum <= 0) {
+        throw new AppError('dev_buy_amount must be a positive number', 400, 'INVALID_DEV_BUY_AMOUNT');
+      }
+
+      const slippageNum = parseFloat(slippage);
+      if (isNaN(slippageNum) || slippageNum < 0 || slippageNum > 100) {
+        throw new AppError('slippage must be a number between 0 and 100', 400, 'INVALID_SLIPPAGE');
+      }
+
       // Get user and latest active bundler
       const user = await userModel.getUserByWalletId(user_wallet_id);
       if (!user) {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      if (!user.in_app_public_key || !user.in_app_private_key) {
+        throw new AppError('User does not have in-app wallet keys', 400, 'MISSING_IN_APP_WALLET');
       }
 
       const bundler = await bundlerModel.getLatestActiveBundler(user_wallet_id);
@@ -477,7 +500,20 @@ class OrchestratorController {
       const imageUrl = await uploadService.processAndUploadLogo(logo_base64, `${symbol.toLowerCase()}-logo`);
 
       // Create token on Pump.fun
-      logger.info('Creating token on Pump.fun');
+      logger.info('Creating token on Pump.fun', {
+        creatorPublicKey: user.in_app_public_key,
+        name,
+        symbol,
+        description,
+        imageUrl,
+        twitter: twitter || '',
+        telegram: telegram || '',
+        website: website || '',
+        devBuyAmount: parseFloat(dev_buy_amount),
+        slippageBps: Math.round(slippage * 100),
+        priorityFeeSol: parseFloat(priority_fee) || 0.000005
+      });
+      
       const tokenCreationData = {
         creatorPublicKey: user.in_app_public_key,
         name,
@@ -489,7 +525,7 @@ class OrchestratorController {
         website: website || '',
         devBuyAmount: parseFloat(dev_buy_amount),
         slippageBps: Math.round(slippage * 100), // Convert percentage to basis points
-        priorityFeeSol: priority_fee || 0.000005,
+        priorityFeeSol: parseFloat(priority_fee) || 0.000005,
         privateKey: user.in_app_private_key,
         commitment: 'confirmed'
       };
