@@ -107,7 +107,7 @@ class ApiResponseValidator {
         return false;
       }
 
-      const { signature, confirmed, postBalances } = response.data;
+      const { signature, confirmed, commitment, postBalances, generatedMint } = response.data;
       
       if (!signature || typeof confirmed !== 'boolean') {
         logger.error('Pump create response missing signature or confirmed field', { signature, confirmed });
@@ -115,18 +115,29 @@ class ApiResponseValidator {
       }
 
       // Check for contract address in postBalances.spl.mintAddress or generatedMint.publicKey
-      const mintAddress = postBalances?.spl?.mintAddress || response.data.generatedMint?.publicKey;
+      const mintAddress = postBalances?.spl?.mintAddress || generatedMint?.publicKey;
       if (!mintAddress) {
         logger.error('Pump create response missing mint address', { 
           postBalancesSpl: postBalances?.spl,
-          generatedMint: response.data.generatedMint
+          generatedMint: generatedMint
         });
         return false;
       }
 
-      // Validate balance structures
-      if (!postBalances?.sol?.balanceSol || !postBalances?.spl?.uiAmount) {
-        logger.error('Pump create response missing post-balance information', { postBalances });
+      // Validate postBalances structure based on the provided API response format
+      if (!postBalances?.sol?.balanceSol || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
+        logger.error('Pump create response missing SOL balance information', { solBalances: postBalances?.sol });
+        return false;
+      }
+
+      if (!postBalances?.spl?.uiAmount || !postBalances?.spl?.rawAmount || !postBalances?.spl?.walletPublicKey) {
+        logger.error('Pump create response missing SPL balance information', { splBalances: postBalances?.spl });
+        return false;
+      }
+
+      // Validate generatedMint if present
+      if (generatedMint && (!generatedMint.publicKey || !generatedMint.privateKey)) {
+        logger.error('Pump create response has invalid generatedMint structure', { generatedMint });
         return false;
       }
 
@@ -149,17 +160,22 @@ class ApiResponseValidator {
         return false;
       }
 
-      const { signature, confirmed, postBalances } = response.data;
+      const { signature, confirmed, commitment, postBalances } = response.data;
       
       if (!signature || typeof confirmed !== 'boolean') {
         logger.error('Pump trade response missing signature or confirmed field', { signature, confirmed });
         return false;
       }
 
-      // Validate balance structures
-      if (!postBalances?.sol?.balanceSol || 
-          postBalances?.spl?.uiAmount === undefined) { // uiAmount can be 0
-        logger.error('Pump trade response missing post-balance information', { postBalances });
+      // Validate postBalances structure based on the provided API response format
+      if (!postBalances?.sol?.balanceSol || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
+        logger.error('Pump trade response missing SOL balance information', { solBalances: postBalances?.sol });
+        return false;
+      }
+
+      // For buy/sell operations, uiAmount and rawAmount should be present
+      if (postBalances?.spl?.uiAmount === undefined || !postBalances?.spl?.rawAmount || !postBalances?.spl?.walletPublicKey || !postBalances?.spl?.mintAddress) {
+        logger.error('Pump trade response missing SPL balance information', { splBalances: postBalances?.spl });
         return false;
       }
 
@@ -204,9 +220,20 @@ class ApiResponseValidator {
   static extractContractAddress(response) {
     try {
       // Priority: postBalances.spl.mintAddress > generatedMint.publicKey
-      return response.data?.postBalances?.spl?.mintAddress || 
-             response.data?.generatedMint?.publicKey || 
-             null;
+      const mintAddress = response?.postBalances?.spl?.mintAddress || 
+                         response?.generatedMint?.publicKey ||
+                         response?.data?.postBalances?.spl?.mintAddress || 
+                         response?.data?.generatedMint?.publicKey || 
+                         null;
+      
+      if (!mintAddress) {
+        logger.error('Could not extract contract address from response', {
+          postBalancesSpl: response?.postBalances?.spl || response?.data?.postBalances?.spl,
+          generatedMint: response?.generatedMint || response?.data?.generatedMint
+        });
+      }
+      
+      return mintAddress;
     } catch (error) {
       logger.error('Error extracting contract address', { error: error.message });
       return null;
@@ -220,15 +247,63 @@ class ApiResponseValidator {
    */
   static extractTradeBalances(response) {
     try {
+      const data = response?.data || response;
       return {
-        solBalance: response.data?.postBalances?.sol?.balanceSol || 0,
-        splBalance: response.data?.postBalances?.spl?.uiAmount || 0,
-        publicKey: response.data?.postBalances?.sol?.publicKey || 
-                   response.data?.postBalances?.spl?.walletPublicKey || null
+        solBalance: data?.postBalances?.sol?.balanceSol || 0,
+        solBalanceLamports: data?.postBalances?.sol?.balanceLamports || '0',
+        splBalance: data?.postBalances?.spl?.uiAmount || 0,
+        splBalanceRaw: data?.postBalances?.spl?.rawAmount || '0',
+        publicKey: data?.postBalances?.sol?.publicKey || 
+                   data?.postBalances?.spl?.walletPublicKey || null,
+        mintAddress: data?.postBalances?.spl?.mintAddress || null
       };
     } catch (error) {
       logger.error('Error extracting trade balances', { error: error.message });
-      return { solBalance: 0, splBalance: 0, publicKey: null };
+      return { 
+        solBalance: 0, 
+        solBalanceLamports: '0',
+        splBalance: 0, 
+        splBalanceRaw: '0',
+        publicKey: null,
+        mintAddress: null
+      };
+    }
+  }
+
+  /**
+   * Extract balance information from token creation response
+   * @param {Object} response - Pump.fun create response
+   * @returns {Object} Balance information including generated mint
+   */
+  static extractCreationBalances(response) {
+    try {
+      const data = response?.data || response;
+      return {
+        solBalance: data?.postBalances?.sol?.balanceSol || 0,
+        solBalanceLamports: data?.postBalances?.sol?.balanceLamports || '0',
+        splBalance: data?.postBalances?.spl?.uiAmount || 0,
+        splBalanceRaw: data?.postBalances?.spl?.rawAmount || '0',
+        publicKey: data?.postBalances?.sol?.publicKey || 
+                   data?.postBalances?.spl?.walletPublicKey || null,
+        mintAddress: data?.postBalances?.spl?.mintAddress || 
+                    data?.generatedMint?.publicKey || null,
+        generatedMint: data?.generatedMint || null,
+        signature: data?.signature || null,
+        confirmed: data?.confirmed || false
+      };
+    } catch (error) {
+      logger.error('Error extracting creation balances', { error: error.message });
+      return { 
+        solBalance: 0, 
+        solBalanceLamports: '0',
+        splBalance: 0, 
+        splBalanceRaw: '0',
+        publicKey: null,
+        mintAddress: null,
+        generatedMint: null,
+        signature: null,
+        confirmed: false
+      };
     }
   }
 }

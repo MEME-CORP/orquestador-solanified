@@ -416,8 +416,12 @@ class OrchestratorController {
       }
 
       // Upload logo to Pinata
-      logger.info('Uploading token logo');
-      const imageUrl = await uploadService.processAndUploadLogo(logo_base64, `${symbol.toLowerCase()}-logo.png`);
+      logger.info('Uploading token logo', { 
+        logoSize: logo_base64?.length || 0,
+        hasDataUri: logo_base64?.startsWith('data:') || false
+      });
+      
+      const imageUrl = await uploadService.processAndUploadLogo(logo_base64, `${symbol.toLowerCase()}-logo`);
 
       // Create token on Pump.fun
       logger.info('Creating token on Pump.fun');
@@ -463,12 +467,22 @@ class OrchestratorController {
       // Update bundler token name
       await bundlerModel.updateTokenName(bundler.id, symbol);
 
+      // Extract and update user balances from token creation response
+      const creationBalances = ApiResponseValidator.extractCreationBalances(tokenResult);
+      
+      logger.info('Extracted token creation balances', {
+        solBalance: creationBalances.solBalance,
+        splBalance: creationBalances.splBalance,
+        mintAddress: creationBalances.mintAddress,
+        signature: creationBalances.signature
+      });
+
       // Update user SOL and SPL balances from token creation
-      if (tokenResult.postBalances?.sol?.balanceSol) {
-        await userModel.updateSolBalance(user_wallet_id, tokenResult.postBalances.sol.balanceSol);
+      if (creationBalances.solBalance > 0) {
+        await userModel.updateSolBalance(user_wallet_id, creationBalances.solBalance);
       }
-      if (tokenResult.postBalances?.spl?.uiAmount) {
-        await userModel.updateSplBalance(user_wallet_id, tokenResult.postBalances.spl.uiAmount);
+      if (creationBalances.splBalance > 0) {
+        await userModel.updateSplBalance(user_wallet_id, creationBalances.splBalance);
       }
 
       // Get child wallets for buying
@@ -504,21 +518,43 @@ class OrchestratorController {
         const buyResults = await pumpService.batchBuy(buyOperations, `token-buy-${bundler.id}`);
 
         // Update child wallet balances from buy results
+        let successfulBuys = 0;
         for (let i = 0; i < buyResults.results.length; i++) {
           const result = buyResults.results[i];
           const wallet = buyableWallets[i];
           
           if (result.success && result.data) {
             const balances = ApiResponseValidator.extractTradeBalances(result.data);
+            
+            logger.info('Processing buy result for child wallet', {
+              walletPublicKey: wallet.public_key,
+              solBalance: balances.solBalance,
+              splBalance: balances.splBalance,
+              mintAddress: balances.mintAddress,
+              signature: result.data?.signature
+            });
+            
             if (balances.publicKey) {
               await walletModel.updateChildWalletBalances(
                 wallet.public_key,
                 balances.solBalance,
                 balances.splBalance
               );
+              successfulBuys++;
             }
+          } else {
+            logger.error('Buy operation failed for child wallet', {
+              walletPublicKey: wallet.public_key,
+              error: result.error
+            });
           }
         }
+        
+        logger.info('Batch buy operations summary', {
+          totalWallets: buyableWallets.length,
+          successfulBuys,
+          failedBuys: buyableWallets.length - successfulBuys
+        });
 
         logger.info('Buy operations completed', {
           successful: buyResults.successful,

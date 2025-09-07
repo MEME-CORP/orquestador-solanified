@@ -109,13 +109,42 @@ class UploadService {
           contentType = matches[1];
           base64Data = matches[2];
           
+          // Validate content type for PNG and JPG specifically
+          if (!['image/png', 'image/jpeg', 'image/jpg'].includes(contentType.toLowerCase())) {
+            throw new AppError(
+              `Unsupported image format: ${contentType}. Only PNG and JPG/JPEG are supported.`,
+              400,
+              'UNSUPPORTED_IMAGE_FORMAT'
+            );
+          }
+          
           // Generate filename based on content type if not provided
           if (!fileName) {
-            const extension = contentType.split('/')[1] || 'png';
+            let extension = contentType.split('/')[1] || 'png';
+            // Normalize jpeg to jpg for filename
+            if (extension === 'jpeg') extension = 'jpg';
             generatedFileName = `logo-${Date.now()}.${extension}`;
+          }
+        } else {
+          throw new AppError(
+            'Invalid data URI format. Expected format: data:image/[png|jpeg];base64,[data]',
+            400,
+            'INVALID_DATA_URI'
+          );
+        }
+      } else {
+        // If no data URI prefix, try to detect image type from base64 header
+        const imageType = this.detectImageTypeFromBase64(base64Data);
+        if (imageType) {
+          contentType = `image/${imageType}`;
+          if (!fileName) {
+            generatedFileName = `logo-${Date.now()}.${imageType}`;
           }
         }
       }
+
+      // Validate image size before upload
+      this.validateImageSize(base64Data, 5); // 5MB max
 
       const uploadResult = await this.uploadImage(base64Data, generatedFileName, contentType);
       return uploadResult.gatewayUrl;
@@ -131,6 +160,34 @@ class UploadService {
         500,
         'LOGO_PROCESSING_FAILED'
       );
+    }
+  }
+
+  /**
+   * Detect image type from base64 data by examining magic bytes
+   * @param {string} base64Data - Base64 encoded image data
+   * @returns {string|null} Image type ('png', 'jpg') or null if unknown
+   */
+  detectImageTypeFromBase64(base64Data) {
+    try {
+      // Convert first few bytes from base64 to hex to check magic numbers
+      const buffer = Buffer.from(base64Data.substring(0, 16), 'base64');
+      const hex = buffer.toString('hex').toUpperCase();
+      
+      // PNG magic number: 89504E47
+      if (hex.startsWith('89504E47')) {
+        return 'png';
+      }
+      
+      // JPEG magic numbers: FFD8FF
+      if (hex.startsWith('FFD8FF')) {
+        return 'jpg';
+      }
+      
+      return null;
+    } catch (error) {
+      logger.warn('Could not detect image type from base64 data', { error: error.message });
+      return null;
     }
   }
 
