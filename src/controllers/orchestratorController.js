@@ -493,27 +493,73 @@ class OrchestratorController {
         childWallets.push(...motherWallet.child_wallets);
       }
 
-      // Filter child wallets with sufficient SOL balance for buying
+      // Filter child wallets with sufficient SOL balance for buying (using database values)
       const MIN_BUY_AMOUNT = 0.001;
-      const buyableWallets = childWallets.filter(wallet => 
-        parseFloat(wallet.balance_sol) >= MIN_BUY_AMOUNT
-      );
+      const MIN_FEE_RESERVE = 0.002; // Reserve more for transaction fees + priority fees
+      const buyableWallets = [];
+
+      logger.info('Checking child wallet balances from database', {
+        totalChildWallets: childWallets.length,
+        minBuyAmount: MIN_BUY_AMOUNT,
+        feeReserve: MIN_FEE_RESERVE
+      });
+
+      for (const wallet of childWallets) {
+        const dbBalance = parseFloat(wallet.balance_sol);
+        const availableForBuy = Math.max(dbBalance - MIN_FEE_RESERVE, 0);
+        
+        logger.info('Child wallet balance check (database)', {
+          publicKey: wallet.public_key,
+          dbBalance,
+          availableForBuy,
+          meetsMinimum: availableForBuy >= MIN_BUY_AMOUNT
+        });
+
+        if (availableForBuy >= MIN_BUY_AMOUNT) {
+          buyableWallets.push({
+            ...wallet,
+            availableForBuy: Math.min(availableForBuy, 0.5) // Cap max buy amount to prevent issues
+          });
+        }
+      }
 
       if (buyableWallets.length === 0) {
-        logger.warn('No child wallets have sufficient balance for buying');
+        logger.warn('No child wallets have sufficient balance for buying', {
+          totalWallets: childWallets.length,
+          minRequired: MIN_BUY_AMOUNT + MIN_FEE_RESERVE,
+          walletBalances: childWallets.map(w => ({
+            publicKey: w.public_key,
+            dbBalance: parseFloat(w.balance_sol)
+          }))
+        });
       } else {
-        // Execute buy operations
-        logger.info('Executing buy operations', { walletCount: buyableWallets.length });
+        // Execute buy operations with conservative amounts based on database values
+        logger.info('Executing buy operations with database-based calculations', { 
+          walletCount: buyableWallets.length,
+          totalAvailable: buyableWallets.reduce((sum, w) => sum + w.availableForBuy, 0).toFixed(6)
+        });
         
         const buyOperations = buyableWallets.map(wallet => ({
           buyerPublicKey: wallet.public_key,
           mintAddress: contractAddress,
-          solAmount: Math.max(parseFloat(wallet.balance_sol) - 0.0002, MIN_BUY_AMOUNT), // Leave some for fees
+          solAmount: wallet.availableForBuy, // Use calculated available amount from database
           slippageBps: Math.round(slippage * 100),
           priorityFeeSol: priority_fee || 0.000005,
           privateKey: wallet.private_key,
           commitment: 'confirmed'
         }));
+
+        // Log the prepared operations for debugging
+        logger.info('Buy operations prepared with database-based calculations', {
+          operations: buyOperations.map((op, i) => ({
+            index: i,
+            wallet: op.buyerPublicKey,
+            dbBalance: parseFloat(buyableWallets[i].balance_sol),
+            solAmountToBuy: op.solAmount,
+            feeReserved: MIN_FEE_RESERVE,
+            priorityFee: op.priorityFeeSol
+          }))
+        });
 
         const buyResults = await pumpService.batchBuy(buyOperations, `token-buy-${bundler.id}`);
 

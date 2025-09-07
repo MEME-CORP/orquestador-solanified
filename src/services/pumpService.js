@@ -152,7 +152,7 @@ class PumpService {
   }
 
   /**
-   * Execute multiple buy operations for bundler wallets
+   * Execute multiple buy operations for bundler wallets with rate limiting
    * @param {Array} buyOperations - Array of buy operation objects
    * @param {string} [idempotencyKey] - Base idempotency key
    * @returns {Promise<Object>} Batch buy results
@@ -161,15 +161,33 @@ class PumpService {
     const results = [];
     const errors = [];
 
-    logger.info('Executing batch buy operations', { count: buyOperations.length });
+    logger.info('Executing batch buy operations with rate limiting', { count: buyOperations.length });
 
     for (let i = 0; i < buyOperations.length; i++) {
       try {
         const config = idempotencyKey ? { idempotencyKey: `${idempotencyKey}-buy-${i}` } : {};
-        const result = await this.buy(buyOperations[i]);
+        
+        // Add delay between requests to respect rate limits (1 req/s)
+        if (i > 0) {
+          const delay = 1200; // 1.2 seconds to be safe
+          logger.info(`Rate limiting: waiting ${delay}ms before next buy operation`, { operationIndex: i });
+          await this.sleep(delay);
+        }
+        
+        const result = await this.buyWithRetry(buyOperations[i], 3);
         results.push({ index: i, success: true, data: result });
+        
+        logger.info(`Buy operation ${i + 1}/${buyOperations.length} completed successfully`, {
+          buyer: buyOperations[i].buyerPublicKey,
+          solAmount: buyOperations[i].solAmount
+        });
+        
       } catch (error) {
-        logger.error(`Batch buy operation ${i} failed:`, error);
+        logger.error(`Batch buy operation ${i} failed after retries:`, {
+          buyer: buyOperations[i].buyerPublicKey,
+          error: error.message,
+          code: error.code
+        });
         errors.push({ index: i, error: error.message });
         results.push({ index: i, success: false, error: error.message });
       }
@@ -181,6 +199,77 @@ class PumpService {
       failed: errors.length,
       errors
     };
+  }
+
+  /**
+   * Buy tokens with retry mechanism for rate limiting
+   * @param {Object} buyData - Buy parameters
+   * @param {number} maxRetries - Maximum number of retries
+   * @returns {Promise<Object>} Buy result
+   */
+  async buyWithRetry(buyData, maxRetries = 3) {
+    let lastError = null;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.buy(buyData);
+      } catch (error) {
+        lastError = error;
+        
+        // Check if it's a rate limit error
+        const isRateLimit = error.message?.includes('Rate limit exceeded') || 
+                           error.message?.includes('rate limit') ||
+                           (error.statusCode === 400 && error.message?.includes('max 1 req/s'));
+        
+        // Check if it's an insufficient balance error
+        const isInsufficientBalance = error.message?.includes('insufficient lamports') ||
+                                    error.message?.includes('Transfer: insufficient');
+        
+        if (isInsufficientBalance) {
+          logger.error('Insufficient balance detected, not retrying', {
+            buyer: buyData.buyerPublicKey,
+            solAmount: buyData.solAmount,
+            error: error.message
+          });
+          throw error; // Don't retry insufficient balance errors
+        }
+        
+        if (isRateLimit && attempt < maxRetries) {
+          const backoffDelay = Math.min(1000 * Math.pow(2, attempt), 10000); // Exponential backoff, max 10s
+          logger.warn(`Rate limit hit, retrying in ${backoffDelay}ms`, {
+            attempt,
+            maxRetries,
+            buyer: buyData.buyerPublicKey
+          });
+          await this.sleep(backoffDelay);
+          continue;
+        }
+        
+        if (attempt < maxRetries) {
+          const retryDelay = 2000 * attempt; // Linear backoff for other errors
+          logger.warn(`Buy attempt ${attempt} failed, retrying in ${retryDelay}ms`, {
+            buyer: buyData.buyerPublicKey,
+            error: error.message
+          });
+          await this.sleep(retryDelay);
+          continue;
+        }
+        
+        // If we've exhausted all retries, throw the last error
+        throw error;
+      }
+    }
+    
+    throw lastError;
+  }
+
+  /**
+   * Sleep utility function
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise<void>}
+   */
+  async sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
