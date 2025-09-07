@@ -39,23 +39,6 @@ class WalletModel {
    */
   async updateChildWalletBalances(publicKey, balanceSol, balanceSpl) {
     try {
-      // First get the current balances for comparison
-      const { data: currentData, error: selectError } = await supabase
-        .from('child_wallets')
-        .select('balance_sol, balance_spl')
-        .eq('public_key', publicKey)
-        .single();
-
-      if (selectError) {
-        throw selectError;
-      }
-
-      const previousSolBalance = parseFloat(currentData.balance_sol) || 0;
-      const previousSplBalance = parseFloat(currentData.balance_spl) || 0;
-      const newSolBalance = parseFloat(balanceSol) || 0;
-      const newSplBalance = parseFloat(balanceSpl) || 0;
-
-      // Now update the balances
       const { data, error } = await supabase
         .from('child_wallets')
         .update({ 
@@ -70,20 +53,13 @@ class WalletModel {
         throw error;
       }
 
-      const solChanged = Math.abs(previousSolBalance - newSolBalance) > 0.000001; // 1 microSOL tolerance
-      const splChanged = Math.abs(previousSplBalance - newSplBalance) > 0.000001; // Small tolerance for floating point
-
       logger.info('Child wallet balances updated', { 
         publicKey, 
-        balanceSol: newSolBalance, 
-        balanceSpl: newSplBalance,
+        balanceSol, 
+        balanceSpl,
         updateType: 'both_sol_and_spl',
-        previousSolBalance,
-        previousSplBalance,
-        solChanged,
-        splChanged,
-        solDifference: newSolBalance - previousSolBalance,
-        splDifference: newSplBalance - previousSplBalance
+        solChanged: data.balance_sol !== balanceSol,
+        splChanged: data.balance_spl !== balanceSpl
       });
       return data;
     } catch (error) {
@@ -100,20 +76,6 @@ class WalletModel {
    */
   async updateChildWalletSolBalance(publicKey, balanceSol) {
     try {
-      // First get the current balance for comparison
-      const { data: currentData, error: selectError } = await supabase
-        .from('child_wallets')
-        .select('balance_sol')
-        .eq('public_key', publicKey)
-        .single();
-
-      if (selectError) {
-        throw selectError;
-      }
-
-      const previousSolBalance = parseFloat(currentData.balance_sol) || 0;
-      const newSolBalance = parseFloat(balanceSol) || 0;
-
       const { data, error } = await supabase
         .from('child_wallets')
         .update({ balance_sol: balanceSol })
@@ -125,15 +87,7 @@ class WalletModel {
         throw error;
       }
 
-      const solChanged = Math.abs(previousSolBalance - newSolBalance) > 0.000001;
-
-      logger.info('Child wallet SOL balance updated', { 
-        publicKey, 
-        balanceSol: newSolBalance,
-        previousSolBalance,
-        solChanged,
-        solDifference: newSolBalance - previousSolBalance
-      });
+      logger.info('Child wallet SOL balance updated', { publicKey, balanceSol });
       return data;
     } catch (error) {
       logger.error('Error updating child wallet SOL balance:', { publicKey, error: error.message });
@@ -149,20 +103,6 @@ class WalletModel {
    */
   async updateChildWalletSplBalance(publicKey, balanceSpl) {
     try {
-      // First get the current balance for comparison
-      const { data: currentData, error: selectError } = await supabase
-        .from('child_wallets')
-        .select('balance_spl')
-        .eq('public_key', publicKey)
-        .single();
-
-      if (selectError) {
-        throw selectError;
-      }
-
-      const previousSplBalance = parseFloat(currentData.balance_spl) || 0;
-      const newSplBalance = parseFloat(balanceSpl) || 0;
-
       const { data, error } = await supabase
         .from('child_wallets')
         .update({ balance_spl: balanceSpl })
@@ -174,15 +114,7 @@ class WalletModel {
         throw error;
       }
 
-      const splChanged = Math.abs(previousSplBalance - newSplBalance) > 0.000001;
-
-      logger.info('Child wallet SPL balance updated', { 
-        publicKey, 
-        balanceSpl: newSplBalance,
-        previousSplBalance,
-        splChanged,
-        splDifference: newSplBalance - previousSplBalance
-      });
+      logger.info('Child wallet SPL balance updated', { publicKey, balanceSpl });
       return data;
     } catch (error) {
       logger.error('Error updating child wallet SPL balance:', { publicKey, error: error.message });

@@ -1569,9 +1569,57 @@ class OrchestratorController {
             });
           }
 
-          // Update balances
+          // Update user balance
           const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
           await userModel.updateSolBalance(user_wallet_id, newUserBalance.balanceSol);
+          
+          // CRITICAL: Update child wallet SOL balances to reflect the minimum reserve after transfers
+          logger.info('Updating child wallet balances after SOL transfer back to user', {
+            walletsToUpdate: walletsWithSol.length,
+            minimumReserve: MINIMUM_RESERVE,
+            strategy: 'post_transfer_balance_update'
+          });
+          
+          const childWalletUpdates = walletsWithSol.map(async (wallet) => {
+            try {
+              // Update child wallet to show only the minimum reserve balance
+              await walletModel.updateChildWalletSolBalance(wallet.public_key, MINIMUM_RESERVE);
+              
+              logger.info('Child wallet SOL balance updated after transfer back', {
+                walletPublicKey: wallet.public_key,
+                previousBalance: parseFloat(wallet.balance_sol),
+                newBalance: MINIMUM_RESERVE,
+                balanceReduction: parseFloat(wallet.balance_sol) - MINIMUM_RESERVE,
+                updateReason: 'sol_transferred_back_to_user'
+              });
+              
+              return { publicKey: wallet.public_key, success: true };
+            } catch (error) {
+              logger.error('Failed to update child wallet balance after transfer back', {
+                walletPublicKey: wallet.public_key,
+                error: error.message
+              });
+              return { publicKey: wallet.public_key, success: false, error: error.message };
+            }
+          });
+          
+          const updateResults = await Promise.all(childWalletUpdates);
+          const successfulUpdates = updateResults.filter(r => r.success).length;
+          const failedUpdates = updateResults.filter(r => !r.success).length;
+          
+          logger.info('Child wallet balance updates completed after SOL transfer back', {
+            totalUpdates: updateResults.length,
+            successful: successfulUpdates,
+            failed: failedUpdates,
+            minimumReserveSet: MINIMUM_RESERVE
+          });
+          
+          if (failedUpdates > 0) {
+            logger.warn('Some child wallet balance updates failed after SOL transfer', {
+              failedCount: failedUpdates,
+              failedWallets: updateResults.filter(r => !r.success)
+            });
+          }
         }
 
         // Deactivate bundler
