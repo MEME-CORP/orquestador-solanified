@@ -311,7 +311,7 @@ class OrchestratorController {
             continue;
           }
 
-          // Generate random distribution (ALL 4 child wallets get funds, sum = 0.99 SOL to leave some for fees)
+          // Generate random distribution (ALL 4 child wallets get 0.2-0.3 SOL each, sum = 0.99 SOL to leave some for fees)
           const distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
           
           const childTransfers = [];
@@ -788,29 +788,59 @@ class OrchestratorController {
 
         // Get updated child wallets after sell
         const updatedChildWallets = await bundlerModel.getChildWallets(bundler.id);
-        const walletsWithSol = updatedChildWallets.filter(wallet => 
-          parseFloat(wallet.balance_sol) > 0.0001 // Only transfer if meaningful amount
-        );
+        
+        // Calculate proper rent exemption (account rent + transaction fees)
+        const RENT_EXEMPTION = 0.00203928; // ~2.04 mSOL for account rent exemption
+        const TRANSACTION_FEE = 0.000005; // 5 microSOL for transaction fee
+        const MINIMUM_RESERVE = RENT_EXEMPTION + TRANSACTION_FEE; // ~0.002044 SOL total
+        
+        const walletsWithSol = updatedChildWallets.filter(wallet => {
+          const balance = parseFloat(wallet.balance_sol);
+          const transferableAmount = balance - MINIMUM_RESERVE;
+          return transferableAmount > 0.0001; // Only transfer if meaningful amount after reserves
+        });
 
         if (walletsWithSol.length > 0) {
-          // Transfer all SOL back to in-app wallet
-          const transferBackOperations = walletsWithSol.map(wallet => ({
-            fromPublicKey: wallet.public_key,
-            toPublicKey: user.in_app_public_key,
-            amountSol: Math.max(parseFloat(wallet.balance_sol) - 0.000005, 0), // Leave tiny amount for rent
-            privateKey: wallet.private_key,
-            commitment: 'confirmed'
-          }));
+          // Transfer all available SOL back to in-app wallet (keeping proper reserves)
+          const transferBackOperations = walletsWithSol.map(wallet => {
+            const balance = parseFloat(wallet.balance_sol);
+            const transferAmount = Math.max(balance - MINIMUM_RESERVE, 0);
+            
+            logger.info('Preparing SOL transfer back', {
+              wallet: wallet.public_key,
+              totalBalance: balance,
+              reserveAmount: MINIMUM_RESERVE,
+              transferAmount: transferAmount
+            });
+            
+            return {
+              fromPublicKey: wallet.public_key,
+              toPublicKey: user.in_app_public_key,
+              amountSol: transferAmount,
+              privateKey: wallet.private_key,
+              commitment: 'confirmed'
+            };
+          });
 
           const transferResults = await solService.batchTransfer(
             transferBackOperations,
-            `return-sol-${bundler.id}`
+            `return-sol-${bundler.id}`,
+            2000 // 2 second delay between transfers to avoid rate limits
           );
 
           logger.info('SOL transfer back completed', {
             successful: transferResults.successful,
-            failed: transferResults.failed
+            failed: transferResults.failed,
+            totalOperations: transferBackOperations.length
           });
+
+          // Log failed transfers for debugging
+          if (transferResults.failed > 0) {
+            logger.warn('Some SOL transfers failed during 100% sell cleanup', {
+              failedCount: transferResults.failed,
+              errors: transferResults.errors
+            });
+          }
 
           // Update balances
           const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
@@ -955,33 +985,78 @@ class OrchestratorController {
 
   /**
    * Generate random distribution for child wallets - distribute to ALL child wallets
+   * Each wallet must receive between 0.2 and 0.3 SOL, with total sum equal to totalAmount
    * @param {number} walletCount - Number of child wallets (should be 4)
-   * @param {number} totalAmount - Total amount to distribute
+   * @param {number} totalAmount - Total amount to distribute (should be ~0.99 SOL)
    * @returns {Array<number>} Array of amounts for each wallet
    */
   static generateRandomDistribution(walletCount, totalAmount) {
-    const distributions = new Array(walletCount).fill(0);
+    const MIN_AMOUNT = 0.2;  // Minimum amount per child wallet
+    const MAX_AMOUNT = 0.3;  // Maximum amount per child wallet
     
-    // Distribute to ALL child wallets (not just 2-3)
-    // Generate random weights for all wallets
-    const weights = [];
-    for (let i = 0; i < walletCount; i++) {
-      weights.push(Math.random());
+    // Validate that the constraints are feasible
+    const minTotal = MIN_AMOUNT * walletCount;
+    const maxTotal = MAX_AMOUNT * walletCount;
+    
+    if (totalAmount < minTotal || totalAmount > maxTotal) {
+      logger.warn('Total amount outside feasible range for constraints', {
+        totalAmount,
+        walletCount,
+        minTotal,
+        maxTotal,
+        minPerWallet: MIN_AMOUNT,
+        maxPerWallet: MAX_AMOUNT
+      });
+      
+      // Fallback to proportional distribution if constraints can't be met
+      const fallbackAmount = totalAmount / walletCount;
+      return new Array(walletCount).fill(fallbackAmount);
     }
     
-    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-
-    // Distribute amounts based on weights to ALL wallets
-    for (let i = 0; i < walletCount; i++) {
-      distributions[i] = (weights[i] / totalWeight) * totalAmount;
+    const distributions = new Array(walletCount);
+    let remainingAmount = totalAmount;
+    
+    // Generate amounts for first (n-1) wallets within constraints
+    for (let i = 0; i < walletCount - 1; i++) {
+      const remainingWallets = walletCount - i;
+      const maxForThisWallet = Math.min(MAX_AMOUNT, remainingAmount - MIN_AMOUNT * (remainingWallets - 1));
+      const minForThisWallet = Math.max(MIN_AMOUNT, remainingAmount - MAX_AMOUNT * (remainingWallets - 1));
+      
+      // Generate random amount within the valid range for this wallet
+      const amount = minForThisWallet + Math.random() * (maxForThisWallet - minForThisWallet);
+      distributions[i] = amount;
+      remainingAmount -= amount;
+    }
+    
+    // Last wallet gets exactly the remaining amount (which should be within constraints)
+    distributions[walletCount - 1] = remainingAmount;
+    
+    // Verify all constraints are met
+    const actualTotal = distributions.reduce((sum, amount) => sum + amount, 0);
+    const allWithinRange = distributions.every(amount => amount >= MIN_AMOUNT && amount <= MAX_AMOUNT);
+    
+    if (!allWithinRange || Math.abs(actualTotal - totalAmount) > 0.000001) {
+      logger.error('Distribution constraints validation failed', {
+        distributions: distributions.map(amount => amount.toFixed(9)),
+        actualTotal: actualTotal.toFixed(9),
+        expectedTotal: totalAmount.toFixed(9),
+        totalDifference: (actualTotal - totalAmount).toFixed(9),
+        allWithinRange,
+        minAmount: MIN_AMOUNT,
+        maxAmount: MAX_AMOUNT
+      });
     }
 
-    logger.info('Generated distribution for child wallets', {
+    logger.info('Generated constrained distribution for child wallets', {
       walletCount,
-      totalAmount,
+      totalAmount: totalAmount.toFixed(9),
+      actualTotal: actualTotal.toFixed(9),
+      minAmount: MIN_AMOUNT,
+      maxAmount: MAX_AMOUNT,
       distributions: distributions.map((amount, index) => ({ 
         wallet: index, 
-        amount: amount.toFixed(9) 
+        amount: amount.toFixed(9),
+        withinRange: amount >= MIN_AMOUNT && amount <= MAX_AMOUNT
       }))
     });
 

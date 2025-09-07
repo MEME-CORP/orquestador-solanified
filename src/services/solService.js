@@ -69,17 +69,24 @@ class SolService {
   }
 
   /**
-   * Execute multiple transfers in sequence with error handling
+   * Execute multiple transfers in sequence with error handling and rate limiting
    * @param {Array} transfers - Array of transfer objects
    * @param {string} [idempotencyKey] - Base idempotency key
+   * @param {number} [rateLimitDelay] - Delay between transfers in ms (default: 1500ms for 1 req/s limit)
    * @returns {Promise<Array>} Array of transfer results
    */
-  async batchTransfer(transfers, idempotencyKey = null) {
+  async batchTransfer(transfers, idempotencyKey = null, rateLimitDelay = 1500) {
     const results = [];
     const errors = [];
 
     for (let i = 0; i < transfers.length; i++) {
       try {
+        // Add delay between transfers to respect rate limits (except for first transfer)
+        if (i > 0 && rateLimitDelay > 0) {
+          logger.info(`Rate limiting: waiting ${rateLimitDelay}ms before next transfer`);
+          await new Promise(resolve => setTimeout(resolve, rateLimitDelay));
+        }
+
         const transferKey = idempotencyKey ? `${idempotencyKey}-${i}` : null;
         const result = await this.transfer(transfers[i], transferKey);
         results.push({ index: i, success: true, data: result });
@@ -87,6 +94,9 @@ class SolService {
         logger.error(`Batch transfer ${i} failed:`, error);
         errors.push({ index: i, error: error.message });
         results.push({ index: i, success: false, error: error.message });
+        
+        // Continue with remaining transfers even if one fails
+        continue;
       }
     }
 
