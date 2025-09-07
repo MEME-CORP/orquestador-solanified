@@ -324,15 +324,44 @@ class PumpService {
     const results = [];
     const errors = [];
 
-    logger.info('Executing batch sell operations', { count: sellOperations.length });
+    logger.info('Executing batch sell operations', { 
+      count: sellOperations.length,
+      walletsToProcess: sellOperations.map((op, index) => ({
+        index,
+        wallet: op.sellerPublicKey,
+        tokenAmount: op.tokenAmount,
+        currentBalance: op._debugInfo?.currentSplBalance || 'unknown',
+        expectedSell: op._debugInfo?.willSellAmount || 'unknown'
+      }))
+    });
 
     for (let i = 0; i < sellOperations.length; i++) {
       try {
+        const operation = sellOperations[i];
+        
+        logger.info(`Processing sell operation ${i + 1}/${sellOperations.length}`, {
+          wallet: operation.sellerPublicKey,
+          tokenAmount: operation.tokenAmount,
+          currentBalance: operation._debugInfo?.currentSplBalance || 'unknown',
+          expectedSell: operation._debugInfo?.willSellAmount || 'unknown'
+        });
+
         const config = idempotencyKey ? { idempotencyKey: `${idempotencyKey}-sell-${i}` } : {};
-        const result = await this.sell(sellOperations[i]);
+        const result = await this.sell(operation);
         results.push({ index: i, success: true, data: result });
+        
+        logger.info(`Sell operation ${i + 1}/${sellOperations.length} completed successfully`, {
+          wallet: operation.sellerPublicKey,
+          tokenAmount: operation.tokenAmount
+        });
+        
       } catch (error) {
-        logger.error(`Batch sell operation ${i} failed:`, error);
+        logger.error(`Batch sell operation ${i} failed:`, {
+          wallet: sellOperations[i].sellerPublicKey,
+          tokenAmount: sellOperations[i].tokenAmount,
+          error: error.message,
+          code: error.code
+        });
         errors.push({ index: i, error: error.message });
         results.push({ index: i, success: false, error: error.message });
       }

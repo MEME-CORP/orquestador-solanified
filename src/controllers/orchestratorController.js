@@ -736,29 +736,60 @@ class OrchestratorController {
         childWallets.push(...motherWallet.child_wallets);
       }
 
-      // Filter wallets with SPL tokens to sell
-      const sellableWallets = childWallets.filter(wallet => 
-        parseFloat(wallet.balance_spl) > 0
-      );
-
-      if (sellableWallets.length === 0) {
-        throw new AppError('No tokens to sell', 400, 'NO_TOKENS_TO_SELL');
-      }
-
-      // Execute sell operations
-      logger.info('Executing sell operations', { 
-        walletCount: sellableWallets.length,
-        sellPercent: sell_percent
+      // Include ALL child wallets in sell operations (even those with 0 balance)
+      // This ensures consistent percentage application across all wallets
+      const sellableWallets = childWallets.filter(wallet => {
+        const splBalance = parseFloat(wallet.balance_spl);
+        return splBalance >= 0; // Include all wallets, even with 0 balance
       });
 
-      const sellOperations = sellableWallets.map(wallet => ({
-        sellerPublicKey: wallet.public_key,
-        mintAddress: token.contract_address,
-        tokenAmount: `${sell_percent}%`, // API accepts percentage format
-        slippageBps: 100, // 1% slippage for sells
-        privateKey: wallet.private_key,
-        commitment: 'confirmed'
-      }));
+      // Log detailed wallet information for debugging
+      logger.info('Child wallet SPL balances for sell operation', {
+        totalChildWallets: childWallets.length,
+        sellableWallets: sellableWallets.length,
+        walletBalances: childWallets.map(wallet => ({
+          publicKey: wallet.public_key,
+          splBalance: parseFloat(wallet.balance_spl),
+          solBalance: parseFloat(wallet.balance_sol),
+          willParticipateInSell: parseFloat(wallet.balance_spl) > 0
+        }))
+      });
+
+      // Check if there are any tokens to sell across all wallets
+      const totalSplBalance = childWallets.reduce((sum, wallet) => 
+        sum + parseFloat(wallet.balance_spl), 0
+      );
+
+      if (totalSplBalance === 0) {
+        throw new AppError('No tokens to sell across all child wallets', 400, 'NO_TOKENS_TO_SELL');
+      }
+
+      // Execute sell operations for ALL child wallets
+      // The API will handle 0% of 0 tokens gracefully
+      logger.info('Executing sell operations', { 
+        walletCount: sellableWallets.length,
+        totalSplBalance: totalSplBalance,
+        sellPercent: sell_percent,
+        expectedSellAmount: (totalSplBalance * sell_percent / 100).toFixed(6)
+      });
+
+      const sellOperations = sellableWallets.map(wallet => {
+        const splBalance = parseFloat(wallet.balance_spl);
+        
+        return {
+          sellerPublicKey: wallet.public_key,
+          mintAddress: token.contract_address,
+          tokenAmount: `${sell_percent}%`, // API accepts percentage format
+          slippageBps: 100, // 1% slippage for sells
+          privateKey: wallet.private_key,
+          commitment: 'confirmed',
+          // Add balance info for logging
+          _debugInfo: {
+            currentSplBalance: splBalance,
+            willSellAmount: (splBalance * sell_percent / 100).toFixed(6)
+          }
+        };
+      });
 
       const sellResults = await pumpService.batchSell(
         sellOperations, 
