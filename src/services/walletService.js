@@ -246,6 +246,128 @@ class WalletService {
       );
     }
   }
+
+  /**
+   * Get SPL token balance for a wallet
+   * @param {string} mintAddress - Token contract address
+   * @param {string} walletPublicKey - Wallet public key
+   * @param {Object} options - Options for retry behavior
+   * @param {number} options.maxRetries - Maximum number of retries (default: 3)
+   * @param {boolean} options.logProgress - Whether to log retry progress (default: true)
+   * @returns {Promise<Object>} SPL balance information
+   */
+  async getSplBalance(mintAddress, walletPublicKey, options = {}) {
+    const { maxRetries = 3, logProgress = true } = options;
+    const requestStart = Date.now();
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (logProgress) {
+          logger.info('🔗 [WALLET_SERVICE] Getting SPL token balance', {
+            mintAddress,
+            walletPublicKey,
+            attempt,
+            maxRetries,
+            api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
+            endpoint: `/api/v1/spl/${mintAddress}/balance/${walletPublicKey}`
+          });
+        }
+
+        const response = await apiClient.get(`/api/v1/spl/${mintAddress}/balance/${walletPublicKey}`);
+        const requestTime = Date.now() - requestStart;
+
+        if (logProgress) {
+          logger.info('✅ [WALLET_SERVICE] SPL balance retrieved successfully', {
+            mintAddress,
+            walletPublicKey,
+            request_time_ms: requestTime,
+            attempt,
+            balance_data: response.data
+          });
+        }
+
+        // Validate response structure
+        if (!response.ok || !response.data) {
+          throw new AppError('Invalid SPL balance response format', 502, 'SPL_BALANCE_INVALID_RESPONSE');
+        }
+
+        return {
+          mintAddress,
+          walletPublicKey,
+          balance: response.data.balance || 0,
+          uiAmount: response.data.uiAmount || 0,
+          rawAmount: response.data.rawAmount || '0',
+          decimals: response.data.decimals || 6
+        };
+
+      } catch (error) {
+        const requestTime = Date.now() - requestStart;
+        const isLastAttempt = attempt === maxRetries;
+        
+        // Check if it's a rate limit error
+        const isRateLimit = error.response?.status === 429 || 
+                           error.message?.includes('rate limit') ||
+                           error.message?.includes('Too Many Requests');
+
+        if (logProgress) {
+          logger.warn(`⚠️ [WALLET_SERVICE] SPL balance request failed (attempt ${attempt}/${maxRetries})`, {
+            mintAddress,
+            walletPublicKey,
+            request_time_ms: requestTime,
+            error_message: error.message,
+            error_code: error.code,
+            http_status: error.response?.status,
+            is_rate_limit: isRateLimit,
+            is_last_attempt: isLastAttempt
+          });
+        }
+
+        if (isLastAttempt) {
+          logger.error('❌ [WALLET_SERVICE] SPL balance retrieval failed after all retries', {
+            mintAddress,
+            walletPublicKey,
+            request_time_ms: requestTime,
+            total_attempts: maxRetries,
+            final_error: error.message
+          });
+
+          if (error instanceof AppError) {
+            throw error;
+          }
+
+          // Enhance error context
+          let errorCode = 'EXTERNAL_SPL_BALANCE_ERROR';
+          let errorMessage = 'Failed to get SPL balance from blockchain API';
+
+          if (!error.response) {
+            errorCode = 'NETWORK_ERROR';
+            errorMessage = 'Network error while connecting to blockchain API';
+          } else if (error.response.status >= 500) {
+            errorCode = 'BLOCKCHAIN_API_SERVER_ERROR';
+            errorMessage = 'Blockchain API server error';
+          } else if (error.response.status === 429) {
+            errorCode = 'RATE_LIMITED';
+            errorMessage = 'Rate limited by blockchain API';
+          }
+
+          throw new AppError(errorMessage, 502, errorCode);
+        }
+
+        // Wait before retry (exponential backoff for rate limits, linear for others)
+        const delay = isRateLimit ? Math.pow(2, attempt) * 1000 : attempt * 1000;
+        if (logProgress) {
+          logger.info(`⏳ [WALLET_SERVICE] Waiting ${delay}ms before retry`, {
+            mintAddress,
+            walletPublicKey,
+            attempt,
+            delay_ms: delay,
+            reason: isRateLimit ? 'rate_limit' : 'generic_error'
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
 }
 
 module.exports = new WalletService();

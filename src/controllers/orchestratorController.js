@@ -687,34 +687,62 @@ class OrchestratorController {
              });
              
              if (balances.publicKey) {
-               // Additional validation: if SPL balance is 0 but transaction was successful,
-               // log this for investigation but still update the wallet
+               let finalSplBalance = balances.splBalance;
+               
+               // Fallback strategy: if SPL balance is 0 but transaction was successful,
+               // call the blockchain API to get the actual balance
                if (balances.splBalance === 0 && result.data?.signature) {
-                 logger.warn('Successful buy transaction but SPL balance is 0', {
+                 logger.warn('Successful buy transaction but SPL balance is 0 - calling blockchain API fallback', {
                    walletPublicKey: wallet.public_key,
                    signature: result.data.signature,
                    solAmountSpent: buyOperations[i]?.solAmount,
                    postBalancesSpl: result.data?.postBalances?.spl,
-                   note: 'This wallet may have received tokens that are not reflected in the API response'
+                   mintAddress: contractAddress
                  });
                  
-                 // Still update the wallet with the SOL balance change
-                 // For SPL balance, we'll keep the existing balance since API shows 0
-                 // but user confirmed they received tokens
-                 const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
-                 await walletModel.updateChildWalletBalances(
-                   wallet.public_key,
-                   balances.solBalance,
-                   currentSplBalance // Keep existing SPL balance if API returns 0
-                 );
-               } else {
-                 // Normal case - update both balances
-                 await walletModel.updateChildWalletBalances(
-                   wallet.public_key,
-                   balances.solBalance,
-                   balances.splBalance
-                 );
+                 try {
+                   // Add small delay to avoid overwhelming the API
+                   if (i > 0) {
+                     await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+                   }
+                   
+                   // Call blockchain API to get actual SPL balance
+                   const actualSplBalance = await walletService.getSplBalance(
+                     contractAddress, 
+                     wallet.public_key,
+                     { maxRetries: 2, logProgress: true }
+                   );
+                   
+                   finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+                   
+                   logger.info('Retrieved actual SPL balance from blockchain API', {
+                     walletPublicKey: wallet.public_key,
+                     apiResponseBalance: balances.splBalance,
+                     blockchainActualBalance: finalSplBalance,
+                     signature: result.data.signature,
+                     mintAddress: contractAddress
+                   });
+                   
+                 } catch (fallbackError) {
+                   logger.error('Failed to get SPL balance from blockchain API fallback', {
+                     walletPublicKey: wallet.public_key,
+                     mintAddress: contractAddress,
+                     signature: result.data.signature,
+                     error: fallbackError.message,
+                     note: 'Will keep existing SPL balance in database'
+                   });
+                   
+                   // If blockchain API call fails, keep existing balance
+                   finalSplBalance = parseFloat(wallet.balance_spl) || 0;
+                 }
                }
+               
+               // Update wallet with final balances
+               await walletModel.updateChildWalletBalances(
+                 wallet.public_key,
+                 balances.solBalance,
+                 finalSplBalance
+               );
                successfulBuys++;
              }
            } else {
@@ -771,39 +799,34 @@ class OrchestratorController {
            failedBuys: buyableWallets.length - successfulBuys
          });
 
-         // Post-processing: Verify SPL balances for wallets that showed 0 but had successful transactions
-         const walletsWithZeroSpl = [];
+         // Post-processing: Summary of SPL balance recovery operations
+         let fallbackCallsUsed = 0;
+         let fallbackCallsSuccessful = 0;
+         
          for (let i = 0; i < buyResults.results.length; i++) {
            const result = buyResults.results[i];
-           const wallet = buyableWallets[i];
            
            if (result.success && result.data?.signature) {
              const balances = ApiResponseValidator.extractTradeBalances(result.data);
              if (balances.splBalance === 0) {
-               walletsWithZeroSpl.push({
-                 publicKey: wallet.public_key,
-                 signature: result.data.signature,
-                 solAmountSpent: buyOperations[i]?.solAmount
-               });
+               fallbackCallsUsed++;
+               // Note: We can't easily track success here without restructuring,
+               // but the individual operations already log their success/failure
              }
            }
          }
 
-         if (walletsWithZeroSpl.length > 0) {
-           logger.warn('Found wallets with successful transactions but zero SPL balance in API response', {
-             count: walletsWithZeroSpl.length,
-             wallets: walletsWithZeroSpl,
-             note: 'These wallets may have received tokens that are not reflected in the API response'
+         if (fallbackCallsUsed > 0) {
+           logger.info('SPL balance fallback API calls summary', {
+             totalFallbackCalls: fallbackCallsUsed,
+             note: 'Blockchain API was called to recover actual SPL balances when buy API returned 0'
            });
-           
-           // TODO: Consider adding a blockchain balance verification step here
-           // For now, we log this for monitoring and investigation
          }
 
          logger.info('Buy operations completed', {
            successful: buyResults.successful,
            failed: buyResults.failed,
-           walletsWithZeroSplInResponse: walletsWithZeroSpl.length
+           fallbackCallsUsed: fallbackCallsUsed
          });
       }
 
