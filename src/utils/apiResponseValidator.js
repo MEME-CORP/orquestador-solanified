@@ -125,12 +125,12 @@ class ApiResponseValidator {
       }
 
       // Validate postBalances structure based on the provided API response format
-      if (!postBalances?.sol?.balanceSol || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
+      if (postBalances?.sol?.balanceSol === undefined || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
         logger.error('Pump create response missing SOL balance information', { solBalances: postBalances?.sol });
         return false;
       }
 
-      if (!postBalances?.spl?.uiAmount || !postBalances?.spl?.rawAmount || !postBalances?.spl?.walletPublicKey) {
+      if (postBalances?.spl?.uiAmount === undefined || !postBalances?.spl?.rawAmount || !postBalances?.spl?.walletPublicKey) {
         logger.error('Pump create response missing SPL balance information', { splBalances: postBalances?.spl });
         return false;
       }
@@ -168,7 +168,7 @@ class ApiResponseValidator {
       }
 
       // Validate postBalances structure based on the provided API response format
-      if (!postBalances?.sol?.balanceSol || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
+      if (postBalances?.sol?.balanceSol === undefined || !postBalances?.sol?.balanceLamports || !postBalances?.sol?.publicKey) {
         logger.error('Pump trade response missing SOL balance information', { solBalances: postBalances?.sol });
         return false;
       }
