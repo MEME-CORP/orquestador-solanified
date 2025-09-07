@@ -688,25 +688,26 @@ class OrchestratorController {
              
              if (balances.publicKey) {
                let finalSplBalance = balances.splBalance;
+               let shouldUpdateSplBalance = true;
                
-               // Fallback strategy: if SPL balance is 0 but transaction was successful,
-               // call the blockchain API to get the actual balance
+               // Enhanced fallback strategy for zero SPL balance on successful transactions
                if (balances.splBalance === 0 && result.data?.signature) {
-                 logger.warn('Successful buy transaction but SPL balance is 0 - calling blockchain API fallback', {
+                 logger.warn('Successful buy transaction but SPL balance is 0 - implementing recovery strategy', {
                    walletPublicKey: wallet.public_key,
                    signature: result.data.signature,
                    solAmountSpent: buyOperations[i]?.solAmount,
                    postBalancesSpl: result.data?.postBalances?.spl,
-                   mintAddress: contractAddress
+                   mintAddress: contractAddress,
+                   strategy: 'multi_step_recovery'
                  });
                  
+                 // Step 1: Try blockchain API fallback
                  try {
-                   // Add small delay to avoid overwhelming the API
+                   // Add delay to avoid overwhelming the API
                    if (i > 0) {
-                     await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+                     await new Promise(resolve => setTimeout(resolve, 500));
                    }
                    
-                   // Call blockchain API to get actual SPL balance
                    const actualSplBalance = await walletService.getSplBalance(
                      contractAddress, 
                      wallet.public_key,
@@ -715,7 +716,7 @@ class OrchestratorController {
                    
                    finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
                    
-                   logger.info('Retrieved actual SPL balance from blockchain API', {
+                   logger.info('Successfully retrieved SPL balance from blockchain API', {
                      walletPublicKey: wallet.public_key,
                      apiResponseBalance: balances.splBalance,
                      blockchainActualBalance: finalSplBalance,
@@ -724,25 +725,69 @@ class OrchestratorController {
                    });
                    
                  } catch (fallbackError) {
-                   logger.error('Failed to get SPL balance from blockchain API fallback', {
+                   logger.error('Blockchain API fallback failed - implementing protective strategy', {
                      walletPublicKey: wallet.public_key,
                      mintAddress: contractAddress,
                      signature: result.data.signature,
                      error: fallbackError.message,
-                     note: 'Will keep existing SPL balance in database'
+                     solAmountSpent: buyOperations[i]?.solAmount,
+                     strategy: 'preserve_existing_balance'
                    });
                    
-                   // If blockchain API call fails, keep existing balance
-                   finalSplBalance = parseFloat(wallet.balance_spl) || 0;
+                   // Step 2: If API fails, preserve existing balance and flag for later verification
+                   const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
+                   
+                   // Only update SPL balance if we have a meaningful existing balance
+                   // Otherwise, skip SPL update to prevent corrupting the database
+                   if (currentSplBalance > 0) {
+                     finalSplBalance = currentSplBalance;
+                     logger.info('Preserving existing SPL balance to prevent data corruption', {
+                       walletPublicKey: wallet.public_key,
+                       preservedBalance: finalSplBalance,
+                       signature: result.data.signature
+                     });
+                   } else {
+                     // Don't update SPL balance at all - we know tokens were purchased
+                     shouldUpdateSplBalance = false;
+                     logger.warn('Skipping SPL balance update to prevent zero corruption', {
+                       walletPublicKey: wallet.public_key,
+                       signature: result.data.signature,
+                       solAmountSpent: buyOperations[i]?.solAmount,
+                       note: 'Manual verification may be needed'
+                     });
+                   }
                  }
                }
                
-               // Update wallet with final balances
-               await walletModel.updateChildWalletBalances(
-                 wallet.public_key,
-                 balances.solBalance,
-                 finalSplBalance
-               );
+               // Update wallet balances with protective logic
+               if (shouldUpdateSplBalance) {
+                 await walletModel.updateChildWalletBalances(
+                   wallet.public_key,
+                   balances.solBalance,
+                   finalSplBalance
+                 );
+                 
+                 logger.info('Child wallet balances updated', {
+                   walletPublicKey: wallet.public_key,
+                   solBalance: balances.solBalance,
+                   splBalance: finalSplBalance,
+                   signature: result.data?.signature
+                 });
+               } else {
+                 // Update only SOL balance, preserve existing SPL balance
+                 await walletModel.updateChildWalletSolBalance(
+                   wallet.public_key,
+                   balances.solBalance
+                 );
+                 
+                 logger.info('Updated SOL balance only, preserved existing SPL balance', {
+                   walletPublicKey: wallet.public_key,
+                   solBalance: balances.solBalance,
+                   signature: result.data?.signature,
+                   note: 'SPL balance preserved due to API issues'
+                 });
+               }
+               
                successfulBuys++;
              }
            } else {
@@ -799,28 +844,53 @@ class OrchestratorController {
            failedBuys: buyableWallets.length - successfulBuys
          });
 
-         // Post-processing: Summary of SPL balance recovery operations
+         // Post-processing: Summary of SPL balance recovery operations and delayed verification setup
          let fallbackCallsUsed = 0;
-         let fallbackCallsSuccessful = 0;
+         let skippedSplUpdates = 0;
+         const walletsNeedingVerification = [];
          
          for (let i = 0; i < buyResults.results.length; i++) {
            const result = buyResults.results[i];
+           const wallet = buyableWallets[i];
            
            if (result.success && result.data?.signature) {
              const balances = ApiResponseValidator.extractTradeBalances(result.data);
              if (balances.splBalance === 0) {
                fallbackCallsUsed++;
-               // Note: We can't easily track success here without restructuring,
-               // but the individual operations already log their success/failure
+               
+               // Track wallets that may need manual verification
+               walletsNeedingVerification.push({
+                 publicKey: wallet.public_key,
+                 signature: result.data.signature,
+                 solAmountSpent: buyOperations[i]?.solAmount,
+                 mintAddress: contractAddress,
+                 timestamp: new Date().toISOString()
+               });
              }
            }
          }
 
+         // Log comprehensive summary
          if (fallbackCallsUsed > 0) {
-           logger.info('SPL balance fallback API calls summary', {
+           logger.info('SPL balance recovery operations summary', {
              totalFallbackCalls: fallbackCallsUsed,
-             note: 'Blockchain API was called to recover actual SPL balances when buy API returned 0'
+             walletsNeedingVerification: walletsNeedingVerification.length,
+             verificationDetails: walletsNeedingVerification,
+             note: 'Some wallets may need delayed verification due to API issues'
            });
+           
+           // Schedule delayed verification (optional - could be implemented as a separate endpoint)
+           if (walletsNeedingVerification.length > 0) {
+             logger.warn('Consider implementing delayed SPL balance verification', {
+               walletsToVerify: walletsNeedingVerification.length,
+               suggestion: 'Create a separate verification endpoint to check these wallets after blockchain settlement',
+               walletsDetails: walletsNeedingVerification.map(w => ({
+                 wallet: w.publicKey,
+                 signature: w.signature,
+                 solSpent: w.solAmountSpent
+               }))
+             });
+           }
          }
 
          logger.info('Buy operations completed', {
@@ -1247,35 +1317,161 @@ class OrchestratorController {
     return distributions;
   }
 
-  /**
-   * Extract actual balance from error message
-   * @param {string} errorMessage - Error message containing balance info
-   * @returns {number|null} Actual balance in SOL or null if not found
-   */
-  extractActualBalanceFromError(errorMessage) {
-    try {
-      // Look for pattern: "actual balance 0.048925568 SOL"
-      const match = errorMessage.match(/actual balance ([\d.]+) SOL/);
-      if (match) {
-        return parseFloat(match[1]);
-      }
-      
-      // Alternative pattern: "insufficient lamports 48925568, need 50972165"
-      const lamportsMatch = errorMessage.match(/insufficient lamports (\d+), need (\d+)/);
-      if (lamportsMatch) {
-        const actualLamports = parseInt(lamportsMatch[1]);
-        return actualLamports / 1000000000; // Convert lamports to SOL
-      }
-      
-      return null;
-    } catch (error) {
-      logger.warn('Could not extract balance from error message', { 
-        errorMessage, 
-        extractionError: error.message 
-      });
-      return null;
-    }
-  }
+   /**
+    * Extract actual balance from error message
+    * @param {string} errorMessage - Error message containing balance info
+    * @returns {number|null} Actual balance in SOL or null if not found
+    */
+   extractActualBalanceFromError(errorMessage) {
+     try {
+       // Look for pattern: "actual balance 0.048925568 SOL"
+       const match = errorMessage.match(/actual balance ([\d.]+) SOL/);
+       if (match) {
+         return parseFloat(match[1]);
+       }
+       
+       // Alternative pattern: "insufficient lamports 48925568, need 50972165"
+       const lamportsMatch = errorMessage.match(/insufficient lamports (\d+), need (\d+)/);
+       if (lamportsMatch) {
+         const actualLamports = parseInt(lamportsMatch[1]);
+         return actualLamports / 1000000000; // Convert lamports to SOL
+       }
+       
+       return null;
+     } catch (error) {
+       logger.warn('Could not extract balance from error message', { 
+         errorMessage, 
+         extractionError: error.message 
+       });
+       return null;
+     }
+   }
+
+   /**
+    * Verify and fix SPL balances for specific wallets
+    * This method can be called separately to fix SPL balances that were missed due to API issues
+    * @param {Array} walletVerifications - Array of wallet verification objects
+    * @param {string} mintAddress - Token contract address
+    * @returns {Promise<Object>} Verification results
+    */
+   async verifySplBalances(walletVerifications, mintAddress) {
+     try {
+       logger.info('Starting SPL balance verification process', {
+         walletsToVerify: walletVerifications.length,
+         mintAddress,
+         wallets: walletVerifications.map(w => w.publicKey)
+       });
+
+       const verificationResults = [];
+       let successfulVerifications = 0;
+       let failedVerifications = 0;
+
+       for (let i = 0; i < walletVerifications.length; i++) {
+         const walletInfo = walletVerifications[i];
+         
+         try {
+           // Add delay between requests
+           if (i > 0) {
+             await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+           }
+
+           logger.info('Verifying SPL balance for wallet', {
+             walletPublicKey: walletInfo.publicKey,
+             originalSignature: walletInfo.signature,
+             mintAddress
+           });
+
+           // Try to get the actual SPL balance
+           const actualBalance = await walletService.getSplBalance(
+             mintAddress,
+             walletInfo.publicKey,
+             { maxRetries: 3, logProgress: true }
+           );
+
+           const currentDbBalance = await walletModel.getChildWalletSplBalance(walletInfo.publicKey);
+           const actualSplBalance = actualBalance.uiAmount || actualBalance.balance || 0;
+
+           if (actualSplBalance > 0 && actualSplBalance !== currentDbBalance) {
+             // Update the database with the correct balance
+             await walletModel.updateChildWalletSplBalance(
+               walletInfo.publicKey,
+               actualSplBalance
+             );
+
+             logger.info('SPL balance corrected via verification', {
+               walletPublicKey: walletInfo.publicKey,
+               previousDbBalance: currentDbBalance,
+               correctedBalance: actualSplBalance,
+               originalSignature: walletInfo.signature
+             });
+
+             verificationResults.push({
+               walletPublicKey: walletInfo.publicKey,
+               status: 'corrected',
+               previousBalance: currentDbBalance,
+               correctedBalance: actualSplBalance,
+               signature: walletInfo.signature
+             });
+
+             successfulVerifications++;
+           } else {
+             logger.info('SPL balance verification - no correction needed', {
+               walletPublicKey: walletInfo.publicKey,
+               currentDbBalance,
+               blockchainBalance: actualSplBalance
+             });
+
+             verificationResults.push({
+               walletPublicKey: walletInfo.publicKey,
+               status: 'no_correction_needed',
+               currentBalance: currentDbBalance,
+               blockchainBalance: actualSplBalance
+             });
+
+             successfulVerifications++;
+           }
+
+         } catch (error) {
+           logger.error('Failed to verify SPL balance for wallet', {
+             walletPublicKey: walletInfo.publicKey,
+             error: error.message,
+             originalSignature: walletInfo.signature
+           });
+
+           verificationResults.push({
+             walletPublicKey: walletInfo.publicKey,
+             status: 'failed',
+             error: error.message,
+             signature: walletInfo.signature
+           });
+
+           failedVerifications++;
+         }
+       }
+
+       logger.info('SPL balance verification completed', {
+         totalWallets: walletVerifications.length,
+         successfulVerifications,
+         failedVerifications,
+         correctedWallets: verificationResults.filter(r => r.status === 'corrected').length
+       });
+
+       return {
+         totalWallets: walletVerifications.length,
+         successfulVerifications,
+         failedVerifications,
+         results: verificationResults
+       };
+
+     } catch (error) {
+       logger.error('SPL balance verification process failed', {
+         error: error.message,
+         mintAddress,
+         walletsToVerify: walletVerifications.length
+       });
+       throw error;
+     }
+   }
 }
 
 module.exports = new OrchestratorController();

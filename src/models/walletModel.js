@@ -210,6 +210,30 @@ class WalletModel {
   }
 
   /**
+   * Get child wallet SPL balance
+   * @param {string} publicKey - Child wallet public key
+   * @returns {Promise<number>} Current SPL balance
+   */
+  async getChildWalletSplBalance(publicKey) {
+    try {
+      const { data, error } = await supabase
+        .from('child_wallets')
+        .select('balance_spl')
+        .eq('public_key', publicKey)
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      return parseFloat(data.balance_spl) || 0;
+    } catch (error) {
+      logger.error('Error getting child wallet SPL balance:', { publicKey, error: error.message });
+      throw new AppError('Failed to get child wallet SPL balance', 500, 'CHILD_WALLET_SPL_FETCH_FAILED');
+    }
+  }
+
+  /**
    * Get wallet by public key (works for both mother and child wallets)
    * @param {string} publicKey - Wallet public key
    * @returns {Promise<Object|null>} Wallet object or null
