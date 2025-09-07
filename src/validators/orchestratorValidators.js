@@ -152,6 +152,22 @@ const transferToOwnerWalletSchema = Joi.object({
     })
 });
 
+// Sell SPL tokens from wallet validation
+const sellSplFromWalletSchema = Joi.object({
+  user_wallet_id: walletIdSchema,
+  sell_percent: Joi.number()
+    .integer()
+    .min(1)
+    .max(100)
+    .required()
+    .messages({
+      'number.integer': 'Sell percentage must be an integer',
+      'number.min': 'Sell percentage must be at least 1%',
+      'number.max': 'Sell percentage cannot exceed 100%',
+      'any.required': 'Sell percentage is required'
+    })
+});
+
 // Verify in-app SOL balance validation
 const verifyInAppSolBalanceSchema = Joi.object({
   user_wallet_id: walletIdSchema
@@ -188,6 +204,7 @@ module.exports = {
   createBundlerSchema,
   createAndBuyTokenSchema,
   sellCreatedTokenSchema,
+  sellSplFromWalletSchema,
   transferToOwnerWalletSchema,
   verifyInAppSolBalanceSchema,
   validateRequest

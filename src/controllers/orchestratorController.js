@@ -1290,6 +1290,384 @@ class OrchestratorController {
   }
 
   /**
+   * Sell SPL tokens from user's in-app wallet
+   * POST /api/orchestrator/sell-spl-from-wallet
+   */
+  async sellSplFromWallet(req, res, next) {
+    const startTime = Date.now();
+    const requestId = uuidv4();
+
+    try {
+      const { user_wallet_id, sell_percent } = req.body;
+
+      logger.info('🚀 [SELL_SPL_FROM_WALLET] Request started', {
+        requestId,
+        user_wallet_id,
+        sell_percent,
+        timestamp: new Date().toISOString(),
+        endpoint: 'POST /api/orchestrator/sell-spl-from-wallet',
+        ip: req.ip,
+        userAgent: req.get('User-Agent')
+      });
+
+      // Step 1: Validate input
+      if (!user_wallet_id) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] Missing user_wallet_id', {
+          requestId,
+          body: req.body
+        });
+        throw new AppError('user_wallet_id is required', 400, 'MISSING_USER_WALLET_ID');
+      }
+
+      if (!sell_percent || sell_percent <= 0 || sell_percent > 100) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] Invalid sell_percent', {
+          requestId,
+          sell_percent,
+          body: req.body
+        });
+        throw new AppError('sell_percent must be between 1 and 100', 400, 'INVALID_SELL_PERCENT');
+      }
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] Input validation passed', {
+        requestId,
+        user_wallet_id,
+        sell_percent
+      });
+
+      // Step 2: Get latest token for user from database
+      logger.info('🔍 [SELL_SPL_FROM_WALLET] Getting latest token for user', {
+        requestId,
+        user_wallet_id
+      });
+
+      const token = await tokenModel.getLatestTokenByUser(user_wallet_id);
+      if (!token) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] No token found for user', {
+          requestId,
+          user_wallet_id
+        });
+        throw new AppError('No token found for user', 404, 'TOKEN_NOT_FOUND');
+      }
+
+      const token_contract_address = token.contract_address;
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] Latest token retrieved', {
+        requestId,
+        user_wallet_id,
+        token_id: token.id,
+        token_symbol: token.symbol,
+        token_contract_address,
+        token_created_at: token.created_at
+      });
+
+      // Step 3: Get user data
+      logger.info('🔍 [SELL_SPL_FROM_WALLET] Getting user data', {
+        requestId,
+        user_wallet_id
+      });
+
+      const user = await userModel.getUserByWalletId(user_wallet_id);
+      if (!user) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] User not found', {
+          requestId,
+          user_wallet_id
+        });
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      if (!user.in_app_public_key || !user.in_app_private_key) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] User does not have in-app wallet', {
+          requestId,
+          user_wallet_id,
+          has_public_key: !!user.in_app_public_key,
+          has_private_key: !!user.in_app_private_key
+        });
+        throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
+      }
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] User data retrieved', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: user.in_app_public_key,
+        current_spl_balance: user.balance_spl
+      });
+
+      // Step 4: Get current SPL token balance from blockchain
+      logger.info('🔗 [SELL_SPL_FROM_WALLET] Getting current SPL balance from blockchain', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: user.in_app_public_key,
+        token_contract_address
+      });
+
+      const balanceCheckStart = Date.now();
+      const splBalanceData = await walletService.getSplBalance(
+        token_contract_address, 
+        user.in_app_public_key,
+        { maxRetries: 3, logProgress: true }
+      );
+      const balanceCheckTime = Date.now() - balanceCheckStart;
+
+      const currentSplBalance = splBalanceData.uiAmount || splBalanceData.balance || 0;
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] SPL balance retrieved', {
+        requestId,
+        user_wallet_id,
+        token_contract_address,
+        current_spl_balance: currentSplBalance,
+        balance_check_time_ms: balanceCheckTime,
+        raw_balance_data: splBalanceData
+      });
+
+      // Step 5: Validate sufficient SPL balance
+      if (currentSplBalance <= 0) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] No SPL tokens to sell', {
+          requestId,
+          user_wallet_id,
+          token_contract_address,
+          current_spl_balance: currentSplBalance
+        });
+        throw new AppError('No SPL tokens available to sell', 400, 'NO_SPL_TOKENS_TO_SELL');
+      }
+
+      const sellAmount = (currentSplBalance * sell_percent) / 100;
+      const MIN_SELL_AMOUNT = 0.000001; // Minimum SPL amount to sell
+
+      if (sellAmount < MIN_SELL_AMOUNT) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] Sell amount too small', {
+          requestId,
+          user_wallet_id,
+          current_spl_balance: currentSplBalance,
+          sell_percent,
+          calculated_sell_amount: sellAmount,
+          min_sell_amount: MIN_SELL_AMOUNT
+        });
+        throw new AppError(
+          `Sell amount too small. Current balance: ${currentSplBalance}, calculated sell: ${sellAmount}`,
+          400,
+          'SELL_AMOUNT_TOO_SMALL'
+        );
+      }
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] SPL balance validation passed', {
+        requestId,
+        user_wallet_id,
+        current_spl_balance: currentSplBalance,
+        sell_percent,
+        calculated_sell_amount: sellAmount
+      });
+
+      // Step 6: Execute sell operation via Pump.fun
+      logger.info('🔗 [SELL_SPL_FROM_WALLET] Executing sell operation via Pump.fun', {
+        requestId,
+        user_wallet_id,
+        in_app_public_key: user.in_app_public_key,
+        token_contract_address,
+        sell_percent_string: `${sell_percent}%`,
+        expected_sell_amount: sellAmount
+      });
+
+      const sellOperationStart = Date.now();
+      const sellData = {
+        sellerPublicKey: user.in_app_public_key,
+        mintAddress: token_contract_address,
+        tokenAmount: `${sell_percent}%`, // API accepts percentage format
+        slippageBps: 100, // 1% slippage for sells
+        privateKey: user.in_app_private_key,
+        commitment: 'confirmed'
+      };
+
+      const sellResult = await pumpService.sell(sellData);
+      const sellOperationTime = Date.now() - sellOperationStart;
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] Sell operation completed', {
+        requestId,
+        user_wallet_id,
+        sell_operation_time_ms: sellOperationTime,
+        signature: sellResult.signature,
+        confirmed: sellResult.confirmed
+      });
+
+      // Step 7: Extract and update balances from sell result
+      logger.info('📊 [SELL_SPL_FROM_WALLET] Extracting balances from sell result', {
+        requestId,
+        user_wallet_id,
+        sell_result_signature: sellResult.signature
+      });
+
+      const balances = ApiResponseValidator.extractTradeBalances(sellResult);
+
+      logger.info('✅ [SELL_SPL_FROM_WALLET] Balances extracted from sell result', {
+        requestId,
+        user_wallet_id,
+        extracted_sol_balance: balances.solBalance,
+        extracted_spl_balance: balances.splBalance,
+        mint_address: balances.mintAddress,
+        signature: sellResult.signature
+      });
+
+      // Step 8: Update user balances in database with fallback protection
+      let finalSplBalance = balances.splBalance;
+      let shouldUpdateSplBalance = true;
+
+      // Enhanced fallback strategy for SPL balance issues
+      if (balances.splBalance === 0 && sellResult.signature) {
+        logger.warn('⚠️ [SELL_SPL_FROM_WALLET] API returned 0 SPL balance - implementing recovery strategy', {
+          requestId,
+          user_wallet_id,
+          signature: sellResult.signature,
+          sell_percent,
+          original_balance: currentSplBalance,
+          strategy: 'calculate_expected_remaining'
+        });
+
+        try {
+          // Try blockchain API fallback first
+          const actualSplBalance = await walletService.getSplBalance(
+            token_contract_address, 
+            user.in_app_public_key,
+            { maxRetries: 2, logProgress: true }
+          );
+          
+          finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+          
+          logger.info('✅ [SELL_SPL_FROM_WALLET] Successfully retrieved SPL balance from blockchain API', {
+            requestId,
+            user_wallet_id,
+            api_response_balance: balances.splBalance,
+            blockchain_actual_balance: finalSplBalance,
+            signature: sellResult.signature
+          });
+          
+        } catch (fallbackError) {
+          logger.error('❌ [SELL_SPL_FROM_WALLET] Blockchain API fallback failed - calculating expected balance', {
+            requestId,
+            user_wallet_id,
+            signature: sellResult.signature,
+            error: fallbackError.message,
+            sell_percent,
+            strategy: 'calculate_expected_remaining'
+          });
+          
+          // Calculate expected remaining balance based on sell percentage
+          if (sell_percent === 100) {
+            finalSplBalance = 0;
+            logger.info('📊 [SELL_SPL_FROM_WALLET] 100% sell - setting SPL balance to 0', {
+              requestId,
+              user_wallet_id,
+              signature: sellResult.signature
+            });
+          } else {
+            // For partial sells, calculate expected remaining
+            const expectedRemaining = currentSplBalance * (1 - sell_percent / 100);
+            finalSplBalance = expectedRemaining;
+            
+            logger.info('📊 [SELL_SPL_FROM_WALLET] Calculated expected remaining SPL balance', {
+              requestId,
+              user_wallet_id,
+              original_balance: currentSplBalance,
+              sell_percent,
+              expected_remaining: expectedRemaining,
+              signature: sellResult.signature
+            });
+          }
+        }
+      }
+
+      // Update user balances in database
+      const balanceUpdateStart = Date.now();
+      if (shouldUpdateSplBalance) {
+        await userModel.updateBalances(
+          user_wallet_id,
+          balances.solBalance,
+          finalSplBalance
+        );
+        
+        logger.info('✅ [SELL_SPL_FROM_WALLET] User balances updated in database', {
+          requestId,
+          user_wallet_id,
+          new_sol_balance: balances.solBalance,
+          new_spl_balance: finalSplBalance,
+          signature: sellResult.signature
+        });
+      } else {
+        // Update only SOL balance, preserve existing SPL balance
+        await userModel.updateSolBalance(user_wallet_id, balances.solBalance);
+        
+        logger.info('✅ [SELL_SPL_FROM_WALLET] Updated SOL balance only, preserved existing SPL balance', {
+          requestId,
+          user_wallet_id,
+          new_sol_balance: balances.solBalance,
+          signature: sellResult.signature,
+          note: 'SPL balance preserved due to API issues'
+        });
+      }
+      const balanceUpdateTime = Date.now() - balanceUpdateStart;
+
+      // Step 9: Prepare response
+      const totalTime = Date.now() - startTime;
+      const response = {
+        transaction_signature: sellResult.signature,
+        sell_percent: sell_percent,
+        sold_amount_spl: sellAmount,
+        remaining_spl_balance: finalSplBalance,
+        new_sol_balance: balances.solBalance,
+        token_contract_address: token_contract_address
+      };
+
+      logger.info('🎉 [SELL_SPL_FROM_WALLET] Request completed successfully', {
+        requestId,
+        user_wallet_id,
+        token_contract_address,
+        sell_percent,
+        total_time_ms: totalTime,
+        balance_check_time_ms: balanceCheckTime,
+        sell_operation_time_ms: sellOperationTime,
+        balance_update_time_ms: balanceUpdateTime,
+        response_data: response
+      });
+
+      res.json(response);
+
+    } catch (error) {
+      const totalTime = Date.now() - startTime;
+      
+      logger.error('❌ [SELL_SPL_FROM_WALLET] Request failed', {
+        requestId,
+        user_wallet_id: req.body?.user_wallet_id || 'unknown',
+        sell_percent: req.body?.sell_percent || 'unknown',
+        error_code: error.code || 'UNKNOWN_ERROR',
+        error_message: error.message,
+        error_stack: error.stack,
+        total_time_ms: totalTime,
+        timestamp: new Date().toISOString()
+      });
+
+      // Log additional context for specific error types
+      if (error.code === 'TOKEN_NOT_FOUND') {
+        logger.warn('⚠️ [SELL_SPL_FROM_WALLET] User has no tokens to sell', {
+          requestId,
+          user_wallet_id: req.body?.user_wallet_id,
+          error_details: 'No tokens found in database for this user'
+        });
+      } else if (error.code === 'NO_SPL_TOKENS_TO_SELL') {
+        logger.warn('⚠️ [SELL_SPL_FROM_WALLET] User attempted to sell SPL tokens with zero balance', {
+          requestId,
+          user_wallet_id: req.body?.user_wallet_id
+        });
+      } else if (error.code === 'EXTERNAL_PUMP_SELL_ERROR') {
+        logger.error('🔗 [SELL_SPL_FROM_WALLET] Pump.fun API failure', {
+          requestId,
+          user_wallet_id: req.body?.user_wallet_id,
+          error_details: 'Failed to sell SPL tokens via Pump.fun API'
+        });
+      }
+
+      next(error);
+    }
+  }
+
+  /**
    * Verify in-app SOL balance
    * POST /api/orchestrator/verify-in-app-sol-balance
    */

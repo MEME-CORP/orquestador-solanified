@@ -281,6 +281,122 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  # Orchestrator Endpoints
+  /orchestrator/sell-spl-from-wallet:
+    post:
+      summary: "Sell SPL tokens from user's in-app wallet"
+      description: "Sells a percentage of the user's most recent token (highest ID) from their in-app wallet. The token contract address is automatically retrieved from the database."
+      tags: [Orchestrator]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_wallet_id:
+                  type: string
+                  description: "User's wallet address"
+                  pattern: "^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+                sell_percent:
+                  type: integer
+                  description: "Percentage of SPL tokens to sell (1-100)"
+                  minimum: 1
+                  maximum: 100
+              required: [user_wallet_id, sell_percent]
+              example:
+                user_wallet_id: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+                sell_percent: 50
+      responses:
+        '200':
+          description: "SPL tokens sold successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_signature:
+                    type: string
+                    description: "Transaction signature for the sell operation"
+                  sell_percent:
+                    type: integer
+                    description: "Percentage of tokens sold"
+                  sold_amount_spl:
+                    type: number
+                    description: "Amount of SPL tokens sold"
+                  remaining_spl_balance:
+                    type: number
+                    description: "Remaining SPL token balance after sell"
+                  new_sol_balance:
+                    type: number
+                    description: "New SOL balance after receiving proceeds"
+                  token_contract_address:
+                    type: string
+                    description: "Token contract address that was sold"
+                example:
+                  transaction_signature: "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW"
+                  sell_percent: 50
+                  sold_amount_spl: 1250000.5
+                  remaining_spl_balance: 1250000.5
+                  new_sol_balance: 0.15432
+                  token_contract_address: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+        '400':
+          description: "Bad Request - Invalid input or insufficient balance"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    default: false
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum: [MISSING_USER_WALLET_ID, INVALID_SELL_PERCENT, NO_IN_APP_WALLET, NO_SPL_TOKENS_TO_SELL, SELL_AMOUNT_TOO_SMALL]
+                      message:
+                        type: string
+                example:
+                  ok: false
+                  error:
+                    code: "NO_SPL_TOKENS_TO_SELL"
+                    message: "No SPL tokens available to sell"
+        '404':
+          description: "User or token not found"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    default: false
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum: [USER_NOT_FOUND, TOKEN_NOT_FOUND]
+                      message:
+                        type: string
+                examples:
+                  user_not_found:
+                    value:
+                      ok: false
+                      error:
+                        code: "USER_NOT_FOUND"
+                        message: "User not found"
+                  token_not_found:
+                    value:
+                      ok: false
+                      error:
+                        code: "TOKEN_NOT_FOUND"
+                        message: "No token found for user"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   
 components:
   schemas:

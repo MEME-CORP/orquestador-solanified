@@ -8,6 +8,7 @@ const {
   createBundlerSchema,
   createAndBuyTokenSchema,
   sellCreatedTokenSchema,
+  sellSplFromWalletSchema,
   transferToOwnerWalletSchema,
   verifyInAppSolBalanceSchema
 } = require('../validators/orchestratorValidators');
@@ -50,6 +51,16 @@ router.post(
   '/sell-created-token',
   validateRequest(sellCreatedTokenSchema),
   orchestratorController.sellCreatedToken
+);
+
+/**
+ * Sell SPL tokens from user's in-app wallet
+ * POST /api/orchestrator/sell-spl-from-wallet
+ */
+router.post(
+  '/sell-spl-from-wallet',
+  validateRequest(sellSplFromWalletSchema),
+  orchestratorController.sellSplFromWallet
 );
 
 /**

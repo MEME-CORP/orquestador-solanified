@@ -31,8 +31,9 @@ All endpoints are POST requests under `/api/orchestrator`:
 2. **`/create-bundler`** - Create bundler with mother wallets
 3. **`/create-and-buy-token-pumpFun`** - Create token and execute initial buy
 4. **`/sell-created-token`** - Sell tokens with specified percentage
-5. **`/verify-in-app-sol-balance`** - Verify and update in-app wallet SOL balance
-6. **`/transfer-to-owner-wallet`** - Transfer SOL back to user's main wallet
+5. **`/sell-spl-from-wallet`** - Sell SPL tokens directly from user's in-app wallet
+6. **`/verify-in-app-sol-balance`** - Verify and update in-app wallet SOL balance
+7. **`/transfer-to-owner-wallet`** - Transfer SOL back to user's main wallet
 
 ## Installation
 
@@ -169,7 +170,7 @@ Content-Type: application/json
 }
 ```
 
-### Sell Token
+### Sell Token (from Bundler)
 ```http
 POST /api/orchestrator/sell-created-token
 Content-Type: application/json
@@ -179,6 +180,31 @@ Content-Type: application/json
   "sell_percent": 50
 }
 ```
+
+### Sell SPL Tokens (from In-App Wallet)
+```http
+POST /api/orchestrator/sell-spl-from-wallet
+Content-Type: application/json
+
+{
+  "user_wallet_id": "user_wallet_address",
+  "sell_percent": 50
+}
+```
+
+**Response:**
+```json
+{
+  "transaction_signature": "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
+  "sell_percent": 50,
+  "sold_amount_spl": 1250000.5,
+  "remaining_spl_balance": 1250000.5,
+  "new_sol_balance": 0.15432,
+  "token_contract_address": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+}
+```
+
+> **Note:** This endpoint automatically uses the most recent token created by the user. The token contract address is retrieved from the database based on the highest ID for the given user.
 
 ### Verify In-App SOL Balance
 ```http
@@ -229,9 +255,13 @@ The API uses standardized error responses:
 Common error codes:
 - `VALIDATION_ERROR`: Input validation failed
 - `USER_NOT_FOUND`: User doesn't exist
+- `TOKEN_NOT_FOUND`: No token found for user
 - `INSUFFICIENT_BALANCE`: Not enough SOL for operation
 - `EXTERNAL_API_ERROR`: External blockchain API error
 - `BUNDLER_CREATION_FAILED`: Failed to create bundler
+- `NO_IN_APP_WALLET`: User doesn't have an in-app wallet
+- `NO_SPL_TOKENS_TO_SELL`: No SPL tokens available to sell
+- `SELL_AMOUNT_TOO_SMALL`: Calculated sell amount is below minimum threshold
 
 ## Logging
 
