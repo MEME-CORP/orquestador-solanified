@@ -328,6 +328,8 @@ class OrchestratorController {
 
       // Fan out to child wallets
       logger.info('Distributing to child wallets');
+      // Global sequentialization: ensure only one child funding happens at a time across all mothers
+      let isFirstChildTransfer = true;
       
       for (const motherWallet of bundlerData.allocated_mother_wallets) {
         try {
@@ -338,54 +340,70 @@ class OrchestratorController {
             continue;
           }
 
-          // Generate random distribution (ALL 4 child wallets get 0.2-0.3 SOL each, sum = 0.99 SOL to leave some for fees)
+          // Generate random distribution for 3 child wallets (0.25–0.35 SOL each; total ~0.99 SOL to leave fees)
           const distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
-          
-          const childTransfers = [];
+
+          // Sequential transfers with randomized 1–2 minute delays to avoid simultaneous funding across any wallets
           for (let i = 0; i < childWallets.length; i++) {
-            // All child wallets now receive funds (no need to check > 0)
-            childTransfers.push({
-              fromPublicKey: motherWallet.public_key,
-              toPublicKey: childWallets[i].public_key,
-              amountSol: distributions[i],
-              privateKey: motherWallet.private_key,
-              commitment: 'confirmed'
-            });
-          }
+            const child = childWallets[i];
+            const amount = distributions[i];
 
-          if (childTransfers.length > 0) {
-            const childResults = await solService.batchTransfer(
-              childTransfers, 
-              `${requestId}-child-${motherWallet.id}`
-            );
-
-            // Update child wallet balances with rate limiting
-            for (let i = 0; i < childTransfers.length; i++) {
-              const transfer = childTransfers[i];
-              const result = childResults.results[i];
-              
-              if (result.success) {
-                // Add delay between balance checks to respect API rate limits (4 req/s max)
-                if (i > 0) {
-                  logger.info(`Rate limiting: waiting 300ms before next balance check`);
-                  await new Promise(resolve => setTimeout(resolve, 300)); // 300ms = ~3.3 req/s
-                }
-                
-                try {
-                  const childBalance = await walletService.getSolBalance(transfer.toPublicKey);
-                  await walletModel.updateChildWalletSolBalance(
-                    transfer.toPublicKey,
-                    childBalance.balanceSol
-                  );
-                } catch (balanceError) {
-                  logger.error('Failed to update child wallet balance after transfer', {
-                    publicKey: transfer.toPublicKey,
-                    error: balanceError.message
-                  });
-                  // Continue with other wallets even if one balance update fails
-                }
+            try {
+              // Randomized delay between 1 and 2 minutes before this child transfer (skip before very first overall)
+              if (!isFirstChildTransfer) {
+                const delayMs = 60000 + Math.floor(Math.random() * 60000);
+                logger.info(`Temporization: waiting ${delayMs}ms before next child transfer`, {
+                  motherWalletId: motherWallet.id,
+                  nextChildIndex: i
+                });
+                await new Promise(resolve => setTimeout(resolve, delayMs));
               }
+              isFirstChildTransfer = false;
+
+              logger.info('Initiating child wallet funding', {
+                motherWalletId: motherWallet.id,
+                fromPublicKey: motherWallet.public_key,
+                toPublicKey: child.public_key,
+                amountSol: amount.toFixed(9),
+                index: i,
+                totalChildren: childWallets.length
+              });
+
+              await solService.transfer({
+                fromPublicKey: motherWallet.public_key,
+                toPublicKey: child.public_key,
+                amountSol: amount,
+                privateKey: motherWallet.private_key,
+                commitment: 'confirmed'
+              }, `${requestId}-child-${motherWallet.id}-${i}`);
+
+              // Small delay before balance check to respect API rate limits
+              if (i > 0) {
+                logger.info(`Rate limiting: waiting 300ms before balance check`);
+                await new Promise(resolve => setTimeout(resolve, 300));
+              }
+
+              // Update child wallet balance from blockchain
+              try {
+                const childBalance = await walletService.getSolBalance(child.public_key);
+                await walletModel.updateChildWalletSolBalance(child.public_key, childBalance.balanceSol);
+              } catch (balanceError) {
+                logger.error('Failed to update child wallet balance after transfer', {
+                  publicKey: child.public_key,
+                  error: balanceError.message
+                });
+              }
+
+            } catch (transferError) {
+              logger.error('Child wallet funding failed', {
+                motherWalletId: motherWallet.id,
+                toPublicKey: child.public_key,
+                error: transferError.message
+              });
+              // Continue with next child even if one transfer fails
             }
+
+            // Note: No additional post-transfer delay here; pre-transfer delay above ensures global spacing
           }
 
           // Update mother wallet balance after distributions (with rate limiting)
@@ -2278,14 +2296,15 @@ class OrchestratorController {
 
   /**
    * Generate random distribution for child wallets - distribute to ALL child wallets
-   * Each wallet must receive between 0.2 and 0.3 SOL, with total sum equal to totalAmount
-   * @param {number} walletCount - Number of child wallets (should be 4)
-   * @param {number} totalAmount - Total amount to distribute (should be ~0.99 SOL)
+   * Each wallet must receive between 0.25 and 0.35 SOL (cap at 0.35), with total sum equal to totalAmount.
+   * Typical configuration: 3 child wallets per mother.
+   * @param {number} walletCount - Number of child wallets
+   * @param {number} totalAmount - Total amount to distribute (e.g., ~0.99 SOL)
    * @returns {Array<number>} Array of amounts for each wallet
    */
   static generateRandomDistribution(walletCount, totalAmount) {
-    const MIN_AMOUNT = 0.2;  // Minimum amount per child wallet
-    const MAX_AMOUNT = 0.3;  // Maximum amount per child wallet
+    const MIN_AMOUNT = 0.25;  // Minimum amount per child wallet
+    const MAX_AMOUNT = 0.35;  // Maximum amount per child wallet
     
     // Validate that the constraints are feasible
     const minTotal = MIN_AMOUNT * walletCount;

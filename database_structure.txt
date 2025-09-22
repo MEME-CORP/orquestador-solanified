@@ -299,3 +299,19 @@ COMMIT;
 -- -- Check: AMW child_balance_* == 2.0 / 15 ; bundlers totals match; mother_wallets.is_available == FALSE.
 -- UPDATE bundlers SET is_active = FALSE WHERE id = 1;
 -- -- Check: mother_wallets.is_available flips back to TRUE.
+
+-- =================== DATA POPULATION NOTES (1:3 RATIO) ===================
+-- The schema does NOT enforce a fixed number of child wallets per mother. The
+-- new operational convention is 1 mother wallet : 3 child wallets.
+--
+-- Data Population Guidance:
+-- 1) For every row inserted into mother_wallets, insert exactly three rows into
+--    child_wallets with the corresponding mother_wallet_id.
+-- 2) If existing data contains mother wallets with four children, either
+--    remove one child wallet (preferred) or mark it deprecated so future
+--    operations use three active children per mother.
+-- 3) No ALTER TABLE is required. The logic in the application adapts to the
+--    number of children returned by queries.
+-- 4) Child funding amounts are constrained to approximately 0.25–0.35 SOL per
+--    child (capped at 0.35 SOL each) with total distribution typically ~0.99 SOL
+--    to leave headroom for fees.
