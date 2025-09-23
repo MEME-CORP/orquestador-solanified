@@ -244,7 +244,7 @@ class OrchestratorController {
 
       // Validate balance requirements
       const MIN_BALANCE = 0.1;
-      const requiredAmount = bundler_balance; // 1 SOL per mother wallet
+      const requiredAmount = bundler_balance; // total planned funding amount for this bundler
       
       if (currentBalance < MIN_BALANCE) {
         throw new AppError(
@@ -268,16 +268,23 @@ class OrchestratorController {
         bundler_balance
       );
 
-      // Fund mother wallets (1 SOL each)
-      logger.info('Funding mother wallets', { count: bundlerData.allocated_mother_wallets.length });
+      // Fund mother wallets with per-mother child amount (0.2–0.3 SOL) plus a small fee buffer
+      logger.info('Funding mother wallets (single-child model: childAmount + fee buffer)', { count: bundlerData.allocated_mother_wallets.length });
       
-      const fundingTransfers = bundlerData.allocated_mother_wallets.map(wallet => ({
-        fromPublicKey: user.in_app_public_key,
-        toPublicKey: wallet.public_key,
-        amountSol: 1.0,
-        privateKey: user.in_app_private_key,
-        commitment: 'confirmed'
-      }));
+      const childAmountByMotherId = new Map();
+      const FEE_BUFFER = 0.002; // small buffer to cover mother->child transfer fees
+
+      const fundingTransfers = bundlerData.allocated_mother_wallets.map(wallet => {
+        const childAmount = 0.2 + Math.random() * 0.1; // 0.2 - 0.3 SOL
+        childAmountByMotherId.set(wallet.id, childAmount);
+        return {
+          fromPublicKey: user.in_app_public_key,
+          toPublicKey: wallet.public_key,
+          amountSol: childAmount + FEE_BUFFER,
+          privateKey: user.in_app_private_key,
+          commitment: 'confirmed'
+        };
+      });
 
       const fundingResults = await solService.batchTransfer(fundingTransfers, `${requestId}-funding`);
       
@@ -340,8 +347,17 @@ class OrchestratorController {
             continue;
           }
 
-          // Generate random distribution for 3 child wallets (0.25–0.35 SOL each; total ~0.99 SOL to leave fees)
-          const distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
+          // Determine distribution per mother
+          // If there is exactly one child wallet, use the precomputed per-mother child amount (0.2–0.3 SOL)
+          let distributions;
+          if (childWallets.length === 1) {
+            const planned = childAmountByMotherId.get(motherWallet.id);
+            const amount = planned !== undefined ? planned : (0.2 + Math.random() * 0.1);
+            distributions = [amount];
+          } else {
+            // Fallback for multi-child scenarios (not expected now)
+            distributions = OrchestratorController.generateRandomDistribution(childWallets.length, 0.99);
+          }
 
           // Sequential transfers with randomized 1–2 minute delays to avoid simultaneous funding across any wallets
           for (let i = 0; i < childWallets.length; i++) {
@@ -2296,15 +2312,15 @@ class OrchestratorController {
 
   /**
    * Generate random distribution for child wallets - distribute to ALL child wallets
-   * Each wallet must receive between 0.25 and 0.35 SOL (cap at 0.35), with total sum equal to totalAmount.
-   * Typical configuration: 3 child wallets per mother.
+   * Each wallet must receive between 0.2 and 0.3 SOL, with total sum equal to totalAmount.
+   * Typical configuration: 1 child wallet per mother (fallback supports >1).
    * @param {number} walletCount - Number of child wallets
-   * @param {number} totalAmount - Total amount to distribute (e.g., ~0.99 SOL)
+   * @param {number} totalAmount - Total amount to distribute (e.g., ~0.99 SOL for multi-child fallback)
    * @returns {Array<number>} Array of amounts for each wallet
    */
   static generateRandomDistribution(walletCount, totalAmount) {
-    const MIN_AMOUNT = 0.25;  // Minimum amount per child wallet
-    const MAX_AMOUNT = 0.35;  // Maximum amount per child wallet
+    const MIN_AMOUNT = 0.2;  // Minimum amount per child wallet
+    const MAX_AMOUNT = 0.3;  // Maximum amount per child wallet
     
     // Validate that the constraints are feasible
     const minTotal = MIN_AMOUNT * walletCount;
