@@ -142,4 +142,4 @@ Thumbs.db
 *.temp
 
 # Windsurf
-.windsurf/
+.windsurf/ 

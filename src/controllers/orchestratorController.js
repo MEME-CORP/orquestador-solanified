@@ -263,9 +263,21 @@ class OrchestratorController {
       }
 
       // Create bundler and reserve mother wallets
+      // Convert SOL budget (bundler_balance) into a count of mother wallets based on conservative per-mother estimate
+      const MAX_CHILD_AMOUNT = 0.3; // max of 0.2–0.3
+      const EST_FEE_BUFFER = 0.002;  // estimated fee buffer
+      const perMotherEstimate = MAX_CHILD_AMOUNT + EST_FEE_BUFFER; // 0.302 SOL (upper bound)
+      const motherWalletCount = Math.max(1, Math.floor(bundler_balance / perMotherEstimate));
+
+      logger.info('Calculated mother wallet count from SOL budget', {
+        bundler_balance,
+        perMotherEstimate,
+        motherWalletCount
+      });
+
       const bundlerData = await bundlerModel.createBundlerWithMotherWallets(
         user_wallet_id,
-        bundler_balance
+        motherWalletCount
       );
 
       // Fund mother wallets with per-mother child amount (0.2–0.3 SOL) plus a small fee buffer
