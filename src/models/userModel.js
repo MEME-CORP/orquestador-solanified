@@ -10,26 +10,36 @@ class UserModel {
    * @param {string} inAppPublicKey - Generated in-app public key
    * @returns {Promise<Object>} User record
    */
-  async createUser(userWalletId, inAppPrivateKey, inAppPublicKey) {
+  async createUser(
+    userWalletId,
+    distributorPrivateKey,
+    distributorPublicKey,
+    devPrivateKey = null,
+    devPublicKey = null
+  ) {
     const dbOperationStart = Date.now();
     
     try {
       logger.info('💾 [USER_MODEL] Initiating user creation in database', {
         userWalletId,
-        inAppPublicKey,
-        has_private_key: !!inAppPrivateKey,
-        private_key_length: inAppPrivateKey ? inAppPrivateKey.length : 0,
-        public_key_length: inAppPublicKey ? inAppPublicKey.length : 0
+        inAppPublicKey: distributorPublicKey,
+        has_private_key: !!distributorPrivateKey,
+        private_key_length: distributorPrivateKey ? distributorPrivateKey.length : 0,
+        public_key_length: distributorPublicKey ? distributorPublicKey.length : 0
       });
 
       const { data, error } = await supabase
         .from('users')
         .insert({
           user_wallet_id: userWalletId,
-          in_app_private_key: inAppPrivateKey,
-          in_app_public_key: inAppPublicKey,
-          balance_sol: 0,
-          balance_spl: 0
+          distributor_private_key: distributorPrivateKey,
+          distributor_public_key: distributorPublicKey,
+          distributor_balance_sol: 0,
+          distributor_balance_spl: 0,
+          dev_private_key: devPrivateKey,
+          dev_public_key: devPublicKey,
+          dev_balance_sol: 0,
+          dev_balance_spl: 0
         })
         .select()
         .single();
@@ -60,11 +70,11 @@ class UserModel {
 
       logger.info('✅ [USER_MODEL] User created successfully in database', {
         userWalletId,
-        inAppPublicKey,
+        inAppPublicKey: distributorPublicKey,
         db_operation_time_ms: dbOperationTime,
         user_id: data.id,
-        initial_sol_balance: data.balance_sol,
-        initial_spl_balance: data.balance_spl,
+        initial_sol_balance: data.distributor_balance_sol,
+        initial_spl_balance: data.distributor_balance_spl,
         created_at: data.created_at || new Date().toISOString()
       });
 
@@ -74,7 +84,7 @@ class UserModel {
       
       logger.error('❌ [USER_MODEL] Failed to create user', {
         userWalletId,
-        inAppPublicKey,
+        inAppPublicKey: distributorPublicKey,
         db_operation_time_ms: dbOperationTime,
         error_message: error.message,
         error_code: error.code,
@@ -124,7 +134,7 @@ class UserModel {
     try {
       const { data, error } = await supabase
         .from('users')
-        .update({ balance_sol: balanceSol })
+        .update({ distributor_balance_sol: balanceSol })
         .eq('user_wallet_id', userWalletId)
         .select()
         .single();
@@ -151,7 +161,7 @@ class UserModel {
     try {
       const { data, error } = await supabase
         .from('users')
-        .update({ balance_spl: balanceSpl })
+        .update({ distributor_balance_spl: balanceSpl })
         .eq('user_wallet_id', userWalletId)
         .select()
         .single();
@@ -180,8 +190,8 @@ class UserModel {
       const { data, error } = await supabase
         .from('users')
         .update({ 
-          balance_sol: balanceSol,
-          balance_spl: balanceSpl
+          distributor_balance_sol: balanceSol,
+          distributor_balance_spl: balanceSpl
         })
         .eq('user_wallet_id', userWalletId)
         .select()
@@ -199,6 +209,85 @@ class UserModel {
     }
   }
 
+  async updateDistributorBalances(userWalletId, balanceSol, balanceSpl) {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .update({
+          distributor_balance_sol: balanceSol,
+          distributor_balance_spl: balanceSpl
+        })
+        .eq('user_wallet_id', userWalletId)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      logger.info('Distributor balances updated', { userWalletId, balanceSol, balanceSpl });
+      return data;
+    } catch (error) {
+      logger.error('Error updating distributor balances:', { userWalletId, error: error.message });
+      throw new AppError('Failed to update distributor balances', 500, 'DISTRIBUTOR_BALANCES_UPDATE_FAILED');
+    }
+  }
+
+  async updateDevBalances(userWalletId, balanceSol, balanceSpl) {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .update({
+          dev_balance_sol: balanceSol,
+          dev_balance_spl: balanceSpl
+        })
+        .eq('user_wallet_id', userWalletId)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      logger.info('Dev balances updated', { userWalletId, balanceSol, balanceSpl });
+      return data;
+    } catch (error) {
+      logger.error('Error updating dev balances:', { userWalletId, error: error.message });
+      throw new AppError('Failed to update dev balances', 500, 'DEV_BALANCES_UPDATE_FAILED');
+    }
+  }
+
+  async updateDevWalletKeys(userWalletId, devPrivateKey, devPublicKey) {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .update({
+          dev_private_key: devPrivateKey,
+          dev_public_key: devPublicKey
+        })
+        .eq('user_wallet_id', userWalletId)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      logger.info('Dev wallet keys updated', {
+        userWalletId,
+        has_private_key: !!devPrivateKey,
+        has_public_key: !!devPublicKey,
+        private_key_length: devPrivateKey ? devPrivateKey.length : 0,
+        public_key_length: devPublicKey ? devPublicKey.length : 0
+      });
+
+      return data;
+    } catch (error) {
+      logger.error('Error updating dev wallet keys:', { userWalletId, error: error.message });
+      throw new AppError('Failed to update dev wallet keys', 500, 'DEV_WALLET_UPDATE_FAILED');
+    }
+  }
+
   /**
    * Check if user has sufficient SOL balance
    * @param {string} userWalletId - User's wallet ID
@@ -212,7 +301,7 @@ class UserModel {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
-      return parseFloat(user.balance_sol) >= requiredAmount;
+      return parseFloat(user?.distributor_balance_sol ?? 0) >= requiredAmount;
     } catch (error) {
       if (error instanceof AppError) {
         throw error;

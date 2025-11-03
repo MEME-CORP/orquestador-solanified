@@ -249,6 +249,52 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /spl/transfer:
+    post:
+      summary: "Transfer SPL tokens between in-app wallets"
+      tags: [SPL]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mintAddress:
+                  type: string
+                  description: "Token mint address to transfer."
+                fromPublicKey:
+                  type: string
+                  description: "Source wallet public key."
+                toPublicKey:
+                  type: string
+                  description: "Destination wallet public key."
+                amountRaw:
+                  type: string
+                  description: "Raw token amount (string) to transfer. Optional if transferAll is true."
+                transferAll:
+                  type: boolean
+                  description: "When true, transfers the entire SPL balance for the mint from the source wallet."
+                privateKey:
+                  type: string
+                  description: "Base58 encoded private key of the source wallet. Used only in-memory for signing."
+                commitment:
+                  type: string
+                  enum: [confirmed, finalized]
+                  description: "Optional confirmation level to wait for. Default: confirmed."
+              required: [mintAddress, fromPublicKey, toPublicKey, privateKey]
+      responses:
+        '200':
+          description: "SPL transfer executed"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccessTxSignature'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /upload/pinata-image:
     post:
       summary: "Upload an image to Pinata (base64)"

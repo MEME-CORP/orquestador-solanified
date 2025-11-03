@@ -22,12 +22,16 @@ END$$;
 -- ---------- Core tables ----------
 
 CREATE TABLE IF NOT EXISTS users (
-  id                 BIGSERIAL UNIQUE,
-  user_wallet_id     TEXT PRIMARY KEY,
-  in_app_private_key TEXT NOT NULL,
-  in_app_public_key  TEXT NOT NULL,
-  balance_sol        money9 NOT NULL DEFAULT 0,
-  balance_spl        money9 NOT NULL DEFAULT 0
+  id                      BIGSERIAL UNIQUE,
+  user_wallet_id          TEXT PRIMARY KEY,
+  distributor_private_key TEXT NOT NULL,
+  distributor_public_key  TEXT NOT NULL,
+  distributor_balance_sol money9 NOT NULL DEFAULT 0,
+  distributor_balance_spl money9 NOT NULL DEFAULT 0,
+  dev_private_key         TEXT,
+  dev_public_key          TEXT,
+  dev_balance_sol         money9 NOT NULL DEFAULT 0,
+  dev_balance_spl         money9 NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mother_wallets (

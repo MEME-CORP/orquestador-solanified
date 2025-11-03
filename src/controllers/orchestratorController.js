@@ -59,20 +59,23 @@ class OrchestratorController {
       });
 
       const existingUser = await userModel.getUserByWalletId(user_wallet_id);
-      
+      const existingDistributorKey = existingUser?.distributor_public_key;
+      const existingDevKey = existingUser?.dev_public_key;
+
       if (existingUser) {
         logger.info('📋 [CREATE_WALLET_IN_APP] User found in database', {
           requestId,
           user_wallet_id,
-          has_in_app_wallet: !!existingUser.in_app_public_key,
-          existing_public_key: existingUser.in_app_public_key ? 'exists' : 'none'
+          has_distributor_wallet: !!existingDistributorKey,
+          has_dev_wallet: !!existingDevKey,
+          distributor_public_key: existingDistributorKey ? 'exists' : 'none'
         });
 
-        if (existingUser.in_app_public_key) {
-          logger.warn('⚠️ [CREATE_WALLET_IN_APP] User already has an in-app wallet', {
+        if (existingDistributorKey) {
+          logger.warn('⚠️ [CREATE_WALLET_IN_APP] User already has a distributor wallet', {
             requestId,
             user_wallet_id,
-            existing_public_key: existingUser.in_app_public_key
+            existing_public_key: existingDistributorKey
           });
           throw new AppError('User already has an in-app wallet', 409, 'USER_ALREADY_EXISTS');
         }
@@ -95,35 +98,35 @@ class OrchestratorController {
       const walletData = await walletService.createInAppWallet(1);
       const walletCreationTime = Date.now() - walletCreationStart;
       
-      const wallet = walletData[0]; // First wallet from array
+      const distributorWallet = walletData[0]; // First wallet from array
 
       logger.info('✅ [CREATE_WALLET_IN_APP] Blockchain API call successful', {
         requestId,
         user_wallet_id,
         wallet_creation_time_ms: walletCreationTime,
-        public_key_created: wallet.publicKey,
-        private_key_exists: !!wallet.privateKey
+        public_key_created: distributorWallet.publicKey,
+        private_key_exists: !!distributorWallet.privateKey
       });
 
       // Step 4: Store user data in database
       logger.info('💾 [CREATE_WALLET_IN_APP] Storing user data in database', {
         requestId,
         user_wallet_id,
-        in_app_public_key: wallet.publicKey
+        distributor_public_key: distributorWallet.publicKey
       });
 
       const dbInsertStart = Date.now();
       await userModel.createUser(
         user_wallet_id,
-        wallet.privateKey,
-        wallet.publicKey
+        distributorWallet.privateKey,
+        distributorWallet.publicKey
       );
       const dbInsertTime = Date.now() - dbInsertStart;
 
       logger.info('✅ [CREATE_WALLET_IN_APP] User data stored successfully', {
         requestId,
         user_wallet_id,
-        in_app_public_key: wallet.publicKey,
+        distributor_public_key: distributorWallet.publicKey,
         db_insert_time_ms: dbInsertTime
       });
 
@@ -131,7 +134,7 @@ class OrchestratorController {
       logger.info('📢 [CREATE_WALLET_IN_APP] Sending notification to frontend', {
         requestId,
         user_wallet_id,
-        in_app_public_key: wallet.publicKey,
+        distributor_public_key: distributorWallet.publicKey,
         frontend_url: process.env.FRONTEND_URL || 'https://frontend-solanified.vercel.app'
       });
 
@@ -139,7 +142,7 @@ class OrchestratorController {
       try {
         await notificationService.sendWalletCreationNotification(
           user_wallet_id,
-          wallet.publicKey
+          distributorWallet.publicKey
         );
         const notificationTime = Date.now() - notificationStart;
         
@@ -165,14 +168,16 @@ class OrchestratorController {
       // Step 6: Prepare response
       const totalTime = Date.now() - startTime;
       const response = {
-        in_app_public_key: wallet.publicKey,
+        distributor_public_key: distributorWallet.publicKey,
+        // Maintain backward-compatible alias for existing clients expecting in_app_public_key
+        in_app_public_key: distributorWallet.publicKey,
         balance_sol: "0"
       };
 
       logger.info('🎉 [CREATE_WALLET_IN_APP] Request completed successfully', {
         requestId,
         user_wallet_id,
-        in_app_public_key: wallet.publicKey,
+        distributor_public_key: distributorWallet.publicKey,
         total_time_ms: totalTime,
         wallet_creation_time_ms: walletCreationTime,
         db_insert_time_ms: dbInsertTime,
@@ -181,6 +186,63 @@ class OrchestratorController {
       });
 
       res.json(response);
+
+      const DEV_WALLET_CREATION_DELAY_MS = 2 * 60 * 1000;
+
+      const scheduleDevWalletCreation = () => {
+        if (existingDevKey) {
+          logger.info('⏭️ [CREATE_WALLET_IN_APP] Dev wallet already exists - skipping delayed creation', {
+            requestId,
+            user_wallet_id
+          });
+          return;
+        }
+
+        setTimeout(async () => {
+          try {
+            logger.info('⏱️ [CREATE_WALLET_IN_APP] Delayed dev wallet creation started', {
+              requestId,
+              user_wallet_id,
+              delay_ms: DEV_WALLET_CREATION_DELAY_MS
+            });
+
+            const latestUser = await userModel.getUserByWalletId(user_wallet_id);
+            if (latestUser?.dev_public_key) {
+              logger.info('ℹ️ [CREATE_WALLET_IN_APP] Dev wallet already present at execution time - no action needed', {
+                requestId,
+                user_wallet_id
+              });
+              return;
+            }
+
+            const devWalletData = await walletService.createInAppWallet(1);
+            const devWallet = devWalletData[0];
+
+            await userModel.updateDevWalletKeys(
+              user_wallet_id,
+              devWallet.privateKey,
+              devWallet.publicKey
+            );
+
+            await userModel.updateDevBalances(user_wallet_id, 0, 0);
+
+            logger.info('✅ [CREATE_WALLET_IN_APP] Dev wallet created after delay', {
+              requestId,
+              user_wallet_id,
+              dev_public_key: devWallet.publicKey
+            });
+          } catch (devError) {
+            logger.error('❌ [CREATE_WALLET_IN_APP] Failed to create dev wallet after delay', {
+              requestId,
+              user_wallet_id,
+              error_message: devError.message,
+              error_code: devError.code
+            });
+          }
+        }, DEV_WALLET_CREATION_DELAY_MS);
+      };
+
+      scheduleDevWalletCreation();
 
     } catch (error) {
       const totalTime = Date.now() - startTime;
@@ -238,8 +300,12 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
+      if (!user.distributor_public_key || !user.distributor_private_key) {
+        throw new AppError('User missing distributor wallet credentials', 400, 'MISSING_DISTRIBUTOR_WALLET');
+      }
+
       // Get live SOL balance
-      const balanceData = await walletService.getSolBalance(user.in_app_public_key);
+      const balanceData = await walletService.getSolBalance(user.distributor_public_key);
       const currentBalance = balanceData.balanceSol;
 
       // Validate balance requirements
@@ -290,10 +356,10 @@ class OrchestratorController {
         const childAmount = 0.2 + Math.random() * 0.1; // 0.2 - 0.3 SOL
         childAmountByMotherId.set(wallet.id, childAmount);
         return {
-          fromPublicKey: user.in_app_public_key,
+          fromPublicKey: user.distributor_public_key,
           toPublicKey: wallet.public_key,
           amountSol: childAmount + FEE_BUFFER,
-          privateKey: user.in_app_private_key,
+          privateKey: user.distributor_private_key,
           commitment: 'confirmed'
         };
       });
@@ -313,8 +379,12 @@ class OrchestratorController {
       await new Promise(resolve => setTimeout(resolve, 300));
       
       try {
-        const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
-        await userModel.updateSolBalance(user_wallet_id, newUserBalance.balanceSol);
+        const newUserBalance = await walletService.getSolBalance(user.distributor_public_key);
+        await userModel.updateDistributorBalances(
+          user_wallet_id,
+          newUserBalance.balanceSol,
+          user.distributor_balance_spl
+        );
       } catch (balanceError) {
         logger.error('Failed to update user balance after mother wallet funding', {
           userWalletId: user_wallet_id,
@@ -501,7 +571,9 @@ class OrchestratorController {
         priority_fee
       } = req.body;
 
-      logger.info('Creating and buying token', { user_wallet_id, symbol, dev_buy_amount });
+      const requestId = uuidv4();
+
+      logger.info('Creating and buying token', { requestId, user_wallet_id, symbol, dev_buy_amount });
 
       // Validate input parameters
       if (!name || !symbol || !description) {
@@ -528,8 +600,23 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
-      if (!user.in_app_public_key || !user.in_app_private_key) {
-        throw new AppError('User does not have in-app wallet keys', 400, 'MISSING_IN_APP_WALLET');
+      const distributorPublicKey = user.distributor_public_key;
+      const distributorPrivateKey = user.distributor_private_key;
+      const devPublicKey = user.dev_public_key;
+      const devPrivateKey = user.dev_private_key;
+
+      if (!distributorPublicKey || !distributorPrivateKey) {
+        throw new AppError('User missing distributor wallet keys', 400, 'MISSING_DISTRIBUTOR_WALLET');
+      }
+
+      if (!devPublicKey || !devPrivateKey) {
+        logger.warn('Dev wallet not ready for token creation', {
+          requestId,
+          user_wallet_id,
+          has_dev_public_key: !!devPublicKey,
+          has_dev_private_key: !!devPrivateKey
+        });
+        throw new AppError('Dev wallet not ready yet. Please retry after it has been provisioned.', 409, 'DEV_WALLET_NOT_READY');
       }
 
       const bundler = await bundlerModel.getLatestActiveBundler(user_wallet_id);
@@ -537,8 +624,88 @@ class OrchestratorController {
         throw new AppError('No active bundler found', 404, 'NO_ACTIVE_BUNDLER');
       }
 
+      // Ensure Dev wallet has enough SOL for dev buy (including recommended buffer)
+      const DEV_SOL_BUFFER = 0.3;
+      const requiredDevSol = devBuyAmountNum + DEV_SOL_BUFFER;
+
+      const devBalanceData = await walletService.getSolBalance(devPublicKey);
+      let devAvailableSol = devBalanceData.balanceSol;
+
+      logger.info('Checking Dev wallet balance before token creation', {
+        requestId,
+        user_wallet_id,
+        devPublicKey,
+        devAvailableSol,
+        requiredDevSol,
+        bufferSol: DEV_SOL_BUFFER
+      });
+
+      if (devAvailableSol + 1e-9 < requiredDevSol) {
+        const distributorBalanceData = await walletService.getSolBalance(distributorPublicKey);
+        const distributorAvailableSol = distributorBalanceData.balanceSol;
+        const transferAmount = parseFloat((requiredDevSol - devAvailableSol).toFixed(9));
+
+        logger.info('Prefunding Dev wallet from Distributor', {
+          requestId,
+          user_wallet_id,
+          devPublicKey,
+          distributorPublicKey,
+          transferAmount,
+          distributorAvailableSol
+        });
+
+        if (transferAmount <= 0) {
+          logger.info('Dev wallet already satisfies SOL requirements after rounding', {
+            requestId,
+            user_wallet_id,
+            devPublicKey,
+            transferAmount
+          });
+        } else {
+          if (distributorAvailableSol < transferAmount + 0.01) {
+            throw new AppError('Distributor wallet lacks sufficient SOL to fund Dev wallet', 402, 'INSUFFICIENT_DISTRIBUTOR_FUNDS');
+          }
+
+          await solService.transfer({
+            fromPublicKey: distributorPublicKey,
+            toPublicKey: devPublicKey,
+            amountSol: transferAmount,
+            privateKey: distributorPrivateKey,
+            commitment: 'confirmed'
+          }, `${requestId}-dev-prefund`);
+
+          // Refresh balances post transfer
+          const [updatedDistributorBalance, updatedDevBalance] = await Promise.all([
+            walletService.getSolBalance(distributorPublicKey),
+            walletService.getSolBalance(devPublicKey)
+          ]);
+
+          devAvailableSol = updatedDevBalance.balanceSol;
+
+          await userModel.updateDistributorBalances(
+            user_wallet_id,
+            updatedDistributorBalance.balanceSol,
+            parseFloat(user.distributor_balance_spl || 0)
+          );
+
+          await userModel.updateDevBalances(
+            user_wallet_id,
+            updatedDevBalance.balanceSol,
+            parseFloat(user.dev_balance_spl || 0)
+          );
+
+          logger.info('Dev wallet prefunding completed', {
+            requestId,
+            user_wallet_id,
+            devPublicKey,
+            devAvailableSol
+          });
+        }
+      }
+
       // Upload logo to Pinata
-      logger.info('Uploading token logo', { 
+      logger.info('Uploading token logo', {
+        requestId,
         logoSize: logo_base64?.length || 0,
         hasDataUri: logo_base64?.startsWith('data:') || false
       });
@@ -547,7 +714,8 @@ class OrchestratorController {
 
       // Create token on Pump.fun
       logger.info('Creating token on Pump.fun', {
-        creatorPublicKey: user.in_app_public_key,
+        requestId,
+        creatorPublicKey: devPublicKey,
         name,
         symbol,
         description,
@@ -561,7 +729,7 @@ class OrchestratorController {
       });
       
       const tokenCreationData = {
-        creatorPublicKey: user.in_app_public_key,
+        creatorPublicKey: devPublicKey,
         name,
         symbol,
         description,
@@ -572,7 +740,7 @@ class OrchestratorController {
         devBuyAmount: parseFloat(dev_buy_amount),
         slippageBps: Math.round(slippage * 100), // Convert percentage to basis points
         priorityFeeSol: parseFloat(priority_fee) || 0.000005,
-        privateKey: user.in_app_private_key,
+        privateKey: devPrivateKey,
         commitment: 'confirmed'
       };
 
@@ -612,19 +780,24 @@ class OrchestratorController {
         signature: creationBalances.signature
       });
 
-      // Update user SOL balance from token creation
-      if (creationBalances.solBalance > 0) {
-        await userModel.updateSolBalance(user_wallet_id, creationBalances.solBalance);
+      // Update Dev wallet SOL balance from token creation result
+      if (creationBalances.solBalance > 0 || creationBalances.splBalance > 0) {
+        await userModel.updateDevBalances(
+          user_wallet_id,
+          creationBalances.solBalance,
+          creationBalances.splBalance
+        );
       }
 
-      // Handle SPL balance update with blockchain API fallback
+      // Handle SPL balance update with blockchain API fallback for Dev wallet
       let finalSplBalance = creationBalances.splBalance;
       
       if (creationBalances.splBalance === 0) {
         logger.warn('SPL balance is 0 after token creation - fetching from blockchain API', {
+          requestId,
           user_wallet_id,
           contractAddress,
-          userPublicKey: user.in_app_public_key,
+          devPublicKey,
           signature: creationBalances.signature,
           strategy: 'blockchain_api_fallback'
         });
@@ -635,16 +808,17 @@ class OrchestratorController {
           
           const actualSplBalance = await walletService.getSplBalance(
             contractAddress,
-            user.in_app_public_key,
+            devPublicKey,
             { maxRetries: 3, logProgress: true }
           );
 
           finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
 
           logger.info('Successfully retrieved SPL balance from blockchain API after token creation', {
+            requestId,
             user_wallet_id,
             contractAddress,
-            userPublicKey: user.in_app_public_key,
+            devPublicKey,
             apiResponseBalance: creationBalances.splBalance,
             blockchainActualBalance: finalSplBalance,
             signature: creationBalances.signature
@@ -652,9 +826,10 @@ class OrchestratorController {
 
         } catch (fallbackError) {
           logger.error('Failed to retrieve SPL balance from blockchain API after token creation', {
+            requestId,
             user_wallet_id,
             contractAddress,
-            userPublicKey: user.in_app_public_key,
+            devPublicKey,
             error: fallbackError.message,
             signature: creationBalances.signature,
             fallback_strategy: 'estimate_from_dev_buy'
@@ -685,17 +860,23 @@ class OrchestratorController {
         }
       }
 
-      // Update user SPL balance (either from API response or blockchain API)
+      // Update Dev SPL balance (either from API response or blockchain API)
       if (finalSplBalance > 0) {
-        await userModel.updateSplBalance(user_wallet_id, finalSplBalance);
+        await userModel.updateDevBalances(
+          user_wallet_id,
+          creationBalances.solBalance,
+          finalSplBalance
+        );
         
-        logger.info('User SPL balance updated after token creation', {
+        logger.info('Dev SPL balance updated after token creation', {
+          requestId,
           user_wallet_id,
           splBalance: finalSplBalance,
           balanceSource: creationBalances.splBalance > 0 ? 'api_response' : 'blockchain_api_fallback'
         });
       } else {
-        logger.warn('SPL balance remains 0 after token creation and fallback attempts', {
+        logger.warn('Dev SPL balance remains 0 after token creation and fallback attempts', {
+          requestId,
           user_wallet_id,
           contractAddress,
           signature: creationBalances.signature,
@@ -917,6 +1098,7 @@ class OrchestratorController {
                    } else if (currentSplBalance > 0) {
                      finalSplBalance = currentSplBalance;
                      logger.info('Preserving existing SPL balance to prevent data corruption', {
+                       requestId,
                        walletPublicKey: wallet.public_key,
                        preservedBalance: finalSplBalance,
                        signature: result.data.signature
@@ -942,6 +1124,7 @@ class OrchestratorController {
                 );
                 
                 logger.info('Child wallet balances updated after buy', {
+                  requestId,
                   walletPublicKey: wallet.public_key,
                   solBalance: balances.solBalance,
                   splBalance: finalSplBalance,
@@ -973,6 +1156,7 @@ class OrchestratorController {
             }
             
             logger.error('Buy operation failed for child wallet', {
+              requestId,
               walletPublicKey: wallet.public_key,
               error: result.error,
               databaseBalance: parseFloat(wallet.balance_sol)
@@ -1056,6 +1240,7 @@ class OrchestratorController {
          }
 
          logger.info('Buy operations completed', {
+           requestId,
            successful: buyResults.successful,
            failed: buyResults.failed,
            fallbackCallsUsed: fallbackCallsUsed
@@ -1067,11 +1252,12 @@ class OrchestratorController {
 
       // FINAL STEP: Verify user SPL balance at the end of the whole flow
       // By now, the blockchain should have had enough time to settle all transactions
-      logger.info('🔍 [FINAL_SPL_VERIFICATION] Verifying user SPL balance at end of flow', {
+      logger.info('🔍 [FINAL_SPL_VERIFICATION] Verifying Dev SPL balance at end of flow', {
+        requestId,
         user_wallet_id,
         contractAddress,
-        userPublicKey: user.in_app_public_key,
-        currentSplBalance: user.balance_spl,
+        devPublicKey,
+        currentDevSplBalance: user.dev_balance_spl,
         strategy: 'end_of_flow_verification'
       });
 
@@ -1079,31 +1265,37 @@ class OrchestratorController {
         // Add extra delay to ensure blockchain settlement
         await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay
         
-        const finalUserSplBalance = await walletService.getSplBalance(
+        const finalDevSplBalance = await walletService.getSplBalance(
           contractAddress,
-          user.in_app_public_key,
+          devPublicKey,
           { maxRetries: 5, logProgress: true } // More retries for final verification
         );
 
-        const verifiedUserBalance = finalUserSplBalance.uiAmount || finalUserSplBalance.balance || 0;
+        const verifiedDevBalance = finalDevSplBalance.uiAmount || finalDevSplBalance.balance || 0;
 
-        if (verifiedUserBalance > 0) {
-          // Update user SPL balance with the real blockchain value
-          await userModel.updateSplBalance(user_wallet_id, verifiedUserBalance);
-          
-          logger.info('✅ [FINAL_SPL_VERIFICATION] User SPL balance updated with real blockchain value', {
+        if (verifiedDevBalance > 0) {
+          // Update Dev SPL balance with the real blockchain value
+          await userModel.updateDevBalances(
+            user_wallet_id,
+            devAvailableSol,
+            verifiedDevBalance
+          );
+
+          logger.info('✅ [FINAL_SPL_VERIFICATION] Dev SPL balance updated with real blockchain value', {
+            requestId,
             user_wallet_id,
             contractAddress,
             previousBalance: finalSplBalance,
-            verifiedBalance: verifiedUserBalance,
+            verifiedBalance: verifiedDevBalance,
             balanceSource: 'end_of_flow_blockchain_api',
-            improvement: verifiedUserBalance > finalSplBalance ? 'significant_improvement' : 'minor_adjustment'
+            improvement: verifiedDevBalance > finalSplBalance ? 'significant_improvement' : 'minor_adjustment'
           });
-          
+
           // Update the response to reflect the real balance
-          finalSplBalance = verifiedUserBalance;
+          finalSplBalance = verifiedDevBalance;
         } else {
           logger.warn('⚠️ [FINAL_SPL_VERIFICATION] Blockchain API still returns 0 - keeping estimated balance', {
+            requestId,
             user_wallet_id,
             contractAddress,
             estimatedBalance: finalSplBalance,
@@ -1113,6 +1305,7 @@ class OrchestratorController {
 
       } catch (finalVerificationError) {
         logger.error('❌ [FINAL_SPL_VERIFICATION] Final verification failed - keeping estimated balance', {
+          requestId,
           user_wallet_id,
           contractAddress,
           error: finalVerificationError.message,
@@ -1122,6 +1315,7 @@ class OrchestratorController {
       }
 
       logger.info('Token creation and buying completed', {
+        requestId,
         symbol,
         contractAddress,
         bundler_id: bundler.id,
@@ -1241,13 +1435,23 @@ class OrchestratorController {
   async sellCreatedToken(req, res, next) {
     try {
       const { user_wallet_id, sell_percent } = req.body;
+      const requestId = uuidv4();
 
-      logger.info('Selling created token', { user_wallet_id, sell_percent });
+      logger.info('Selling created token', { requestId, user_wallet_id, sell_percent });
 
-      // Get user and latest active bundler
+      if (!sell_percent || sell_percent <= 0 || sell_percent > 100) {
+        throw new AppError('sell_percent must be between 1 and 100', 400, 'INVALID_SELL_PERCENT');
+      }
+
       const user = await userModel.getUserByWalletId(user_wallet_id);
       if (!user) {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      const distributorPublicKey = user.distributor_public_key;
+
+      if (!distributorPublicKey || !user.distributor_private_key) {
+        throw new AppError('User missing distributor wallet credentials', 400, 'MISSING_DISTRIBUTOR_WALLET');
       }
 
       const bundler = await bundlerModel.getLatestActiveBundler(user_wallet_id);
@@ -1259,29 +1463,24 @@ class OrchestratorController {
         throw new AppError('No token associated with bundler', 400, 'NO_TOKEN_FOUND');
       }
 
-      // Get token info
       const token = await tokenModel.getLatestTokenByUser(user_wallet_id);
       if (!token) {
         throw new AppError('No token found for user', 404, 'TOKEN_NOT_FOUND');
       }
 
-      // Get child wallets with SPL balances
       const bundlerWithWallets = await bundlerModel.getBundlerWithWallets(bundler.id);
       const childWallets = [];
-      
       for (const motherWallet of bundlerWithWallets.mother_wallets) {
         childWallets.push(...motherWallet.child_wallets);
       }
 
-      // Include ALL child wallets in sell operations (even those with 0 balance)
-      // This ensures consistent percentage application across all wallets
       const sellableWallets = childWallets.filter(wallet => {
         const splBalance = parseFloat(wallet.balance_spl);
-        return splBalance >= 0; // Include all wallets, even with 0 balance
+        return splBalance >= 0;
       });
 
-      // Log detailed wallet information for debugging
       logger.info('Child wallet SPL balances for sell operation', {
+        requestId,
         totalChildWallets: childWallets.length,
         sellableWallets: sellableWallets.length,
         walletBalances: childWallets.map(wallet => ({
@@ -1292,35 +1491,20 @@ class OrchestratorController {
         }))
       });
 
-      // Check if there are any tokens to sell across all wallets
-      const totalSplBalance = childWallets.reduce((sum, wallet) => 
-        sum + parseFloat(wallet.balance_spl), 0
-      );
-
+      const totalSplBalance = childWallets.reduce((sum, wallet) => sum + parseFloat(wallet.balance_spl), 0);
       if (totalSplBalance === 0) {
         throw new AppError('No tokens to sell across all child wallets', 400, 'NO_TOKENS_TO_SELL');
       }
 
-      // Execute sell operations for ALL child wallets
-      // The API will handle 0% of 0 tokens gracefully
-      logger.info('Executing sell operations', { 
-        walletCount: sellableWallets.length,
-        totalSplBalance: totalSplBalance,
-        sellPercent: sell_percent,
-        expectedSellAmount: (totalSplBalance * sell_percent / 100).toFixed(6)
-      });
-
       const sellOperations = sellableWallets.map(wallet => {
         const splBalance = parseFloat(wallet.balance_spl);
-        
         return {
           sellerPublicKey: wallet.public_key,
           mintAddress: token.contract_address,
-          tokenAmount: `${sell_percent}%`, // API accepts percentage format
-          slippageBps: 100, // 1% slippage for sells
+          tokenAmount: `${sell_percent}%`,
+          slippageBps: 100,
           privateKey: wallet.private_key,
           commitment: 'confirmed',
-          // Add balance info for logging
           _debugInfo: {
             currentSplBalance: splBalance,
             willSellAmount: (splBalance * sell_percent / 100).toFixed(6)
@@ -1329,21 +1513,21 @@ class OrchestratorController {
       });
 
       const sellResults = await pumpService.batchSell(
-        sellOperations, 
+        sellOperations,
         `token-sell-${bundler.id}-${sell_percent}`
       );
 
-      // Update child wallet balances from sell results with protection against API issues
       let successfulSellUpdates = 0;
       const sellWalletsNeedingVerification = [];
-      
+      const balanceAdjustments = [];
+
       for (let i = 0; i < sellResults.results.length; i++) {
         const result = sellResults.results[i];
         const wallet = sellableWallets[i];
-        
-        if (result.success && result.data) {
-          // Log the complete sell API response for debugging
+
+        if (result?.success && result.data) {
           logger.info('Complete sell API response for debugging', {
+            requestId,
             walletPublicKey: wallet.public_key,
             fullResponse: {
               signature: result.data?.signature,
@@ -1354,241 +1538,223 @@ class OrchestratorController {
               splData: result.data?.postBalances?.spl
             }
           });
-          
+
           const balances = ApiResponseValidator.extractTradeBalances(result.data);
-          
+
           logger.info('Processing sell result for child wallet', {
+            requestId,
             walletPublicKey: wallet.public_key,
             solBalance: balances.solBalance,
             splBalance: balances.splBalance,
             mintAddress: balances.mintAddress,
-            signature: result.data?.signature,
-            extractionDebug: {
-              originalSplUiAmount: result.data?.postBalances?.spl?.uiAmount,
-              originalSplRawAmount: result.data?.postBalances?.spl?.rawAmount,
-              extractedSplBalance: balances.splBalance,
-              splDataExists: !!result.data?.postBalances?.spl
-            }
+            signature: result.data?.signature
           });
-          
-          if (balances.publicKey) {
-            let finalSplBalance = balances.splBalance;
-            let finalSolBalance = balances.solBalance;
-            let shouldUpdateSplBalance = true;
-            let shouldUpdateSolBalance = true;
-            
-            // Store original balances for comparison
-            const originalSolBalance = parseFloat(wallet.balance_sol) || 0;
-            const originalSplBalance = parseFloat(wallet.balance_spl) || 0;
-            
-            // Always verify SOL balance with blockchain API after sell operations
-            // This ensures we get the most accurate balance regardless of API timing issues
-            logger.info('Verifying SOL balance with blockchain API after sell operation', {
+
+          let finalSolBalance = balances.solBalance;
+          let finalSplBalance = balances.splBalance;
+          let shouldUpdateSplBalance = true;
+
+          const originalSolBalance = parseFloat(wallet.balance_sol) || 0;
+          const originalSplBalance = parseFloat(wallet.balance_spl) || 0;
+
+          try {
+            if (i > 0) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            const actualSolBalance = await walletService.getSolBalance(
+              wallet.public_key,
+              { maxRetries: 2, logProgress: true }
+            );
+
+            finalSolBalance = actualSolBalance.balanceSol || 0;
+
+            logger.info('Successfully retrieved real SOL balance from blockchain API after sell', {
+              requestId,
               walletPublicKey: wallet.public_key,
-              originalSolBalance: originalSolBalance,
+              originalSolBalance,
               apiResponseSolBalance: balances.solBalance,
-              signature: result.data.signature,
-              sellPercent: sell_percent,
-              strategy: 'always_verify_sol_balance'
+              blockchainActualSolBalance: finalSolBalance,
+              signature: result.data.signature
             });
-            
+          } catch (solFallbackError) {
+            logger.error('Blockchain API SOL balance fallback failed for sell - using API response', {
+              requestId,
+              walletPublicKey: wallet.public_key,
+              signature: result.data.signature,
+              error: solFallbackError.message,
+              sellPercent: sell_percent,
+              strategy: 'preserve_api_response'
+            });
+
+            finalSolBalance = balances.solBalance ?? originalSolBalance;
+          }
+
+          if ((balances.splBalance === 0 || balances.splBalance === null) && result.data?.signature) {
+            logger.warn('Successful sell transaction but SPL balance is 0 - implementing recovery strategy', {
+              requestId,
+              walletPublicKey: wallet.public_key,
+              signature: result.data.signature,
+              sellPercent: sell_percent
+            });
+
             try {
-              // Add delay to avoid overwhelming the API
               if (i > 0) {
                 await new Promise(resolve => setTimeout(resolve, 500));
               }
-              
-              const actualSolBalance = await walletService.getSolBalance(
+
+              const actualSplBalance = await walletService.getSplBalance(
+                token.contract_address,
                 wallet.public_key,
                 { maxRetries: 2, logProgress: true }
               );
-              
-              finalSolBalance = actualSolBalance.balanceSol || 0;
-              
-              logger.info('Successfully retrieved real SOL balance from blockchain API after sell', {
+
+              finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
+
+              logger.info('Successfully retrieved SPL balance from blockchain API for sell', {
+                requestId,
                 walletPublicKey: wallet.public_key,
-                originalSolBalance: originalSolBalance,
-                apiResponseSolBalance: balances.solBalance,
-                blockchainActualSolBalance: finalSolBalance,
-                signature: result.data.signature,
-                balanceDifference: finalSolBalance - originalSolBalance,
-                balanceImprovement: finalSolBalance > balances.solBalance ? 'blockchain_more_accurate' : 'api_response_accurate'
+                apiResponseBalance: balances.splBalance,
+                blockchainActualBalance: finalSplBalance,
+                signature: result.data.signature
               });
-              
-            } catch (solFallbackError) {
-              logger.error('Blockchain API SOL balance fallback failed for sell - using API response', {
+            } catch (fallbackError) {
+              logger.error('Blockchain API fallback failed for sell - applying estimation safeguards', {
+                requestId,
                 walletPublicKey: wallet.public_key,
                 signature: result.data.signature,
-                error: solFallbackError.message,
-                sellPercent: sell_percent,
-                strategy: 'preserve_api_response'
+                error: fallbackError.message,
+                sellPercent: sell_percent
               });
-              
-              // Keep the API response balance if blockchain verification fails
-              finalSolBalance = balances.solBalance;
-            }
-            
-            // Enhanced fallback strategy for zero SPL balance on successful sell transactions
-            if (balances.splBalance === 0 && result.data?.signature) {
-              logger.warn('Successful sell transaction but SPL balance is 0 - implementing recovery strategy', {
-                walletPublicKey: wallet.public_key,
-                signature: result.data.signature,
-                sellPercent: sell_percent,
-                postBalancesSpl: result.data?.postBalances?.spl,
-                mintAddress: token.contract_address,
-                strategy: 'multi_step_recovery'
-              });
-              
-              // Step 1: Try blockchain API fallback
-              try {
-                // Add delay to avoid overwhelming the API
-                if (i > 0) {
-                  await new Promise(resolve => setTimeout(resolve, 500));
-                }
-                
-                const actualSplBalance = await walletService.getSplBalance(
-                  token.contract_address, 
-                  wallet.public_key,
-                  { maxRetries: 2, logProgress: true }
-                );
-                
-                finalSplBalance = actualSplBalance.uiAmount || actualSplBalance.balance || 0;
-                
-                logger.info('Successfully retrieved SPL balance from blockchain API for sell', {
+
+              if (sell_percent === 100) {
+                finalSplBalance = 0;
+              } else if (originalSplBalance > 0) {
+                finalSplBalance = originalSplBalance * (1 - sell_percent / 100);
+
+                logger.info('Calculated expected remaining SPL balance for sell', {
+                  requestId,
                   walletPublicKey: wallet.public_key,
-                  apiResponseBalance: balances.splBalance,
-                  blockchainActualBalance: finalSplBalance,
-                  signature: result.data.signature,
-                  mintAddress: token.contract_address
-                });
-                
-              } catch (fallbackError) {
-                logger.error('Blockchain API fallback failed for sell - implementing protective strategy', {
-                  walletPublicKey: wallet.public_key,
-                  mintAddress: token.contract_address,
-                  signature: result.data.signature,
-                  error: fallbackError.message,
+                  originalBalance: originalSplBalance,
                   sellPercent: sell_percent,
-                  strategy: 'preserve_existing_balance'
+                  expectedRemaining: finalSplBalance,
+                  signature: result.data.signature
                 });
-                
-                // Step 2: If API fails, calculate expected remaining balance or preserve existing
-                const currentSplBalance = parseFloat(wallet.balance_spl) || 0;
-                
-                // For sell operations, we can estimate the remaining balance
-                if (currentSplBalance > 0 && sell_percent < 100) {
-                  // Calculate expected remaining balance based on sell percentage
-                  const expectedRemaining = currentSplBalance * (1 - sell_percent / 100);
-                  finalSplBalance = expectedRemaining;
-                  
-                  logger.info('Calculated expected remaining SPL balance for sell', {
-                    walletPublicKey: wallet.public_key,
-                    originalBalance: currentSplBalance,
-                    sellPercent: sell_percent,
-                    expectedRemaining: expectedRemaining,
-                    signature: result.data.signature
-                  });
-                } else if (sell_percent === 100) {
-                  // For 100% sell, balance should be 0, but we'll verify this later
-                  finalSplBalance = 0;
-                  
-                  logger.info('100% sell - setting SPL balance to 0', {
-                    walletPublicKey: wallet.public_key,
-                    signature: result.data.signature
-                  });
-                } else {
-                  // Preserve existing balance and flag for verification
-                  finalSplBalance = currentSplBalance;
-                  shouldUpdateSplBalance = false;
-                  
-                  logger.warn('Skipping SPL balance update for sell to prevent corruption', {
-                    walletPublicKey: wallet.public_key,
-                    signature: result.data.signature,
-                    sellPercent: sell_percent,
-                    note: 'Manual verification may be needed'
-                  });
-                  
-                  // Track for verification
-                  sellWalletsNeedingVerification.push({
-                    publicKey: wallet.public_key,
-                    signature: result.data.signature,
-                    sellPercent: sell_percent,
-                    mintAddress: token.contract_address,
-                    timestamp: new Date().toISOString(),
-                    operation: 'sell'
-                  });
-                }
+              } else {
+                finalSplBalance = originalSplBalance;
+                shouldUpdateSplBalance = false;
+
+                sellWalletsNeedingVerification.push({
+                  publicKey: wallet.public_key,
+                  signature: result.data.signature,
+                  sellPercent,
+                  mintAddress: token.contract_address,
+                  timestamp: new Date().toISOString(),
+                  operation: 'sell'
+                });
               }
             }
-            
-             // Always update both SOL and SPL balances - critical fix for sell operations
-             await walletModel.updateChildWalletBalances(
-               wallet.public_key,
-               finalSolBalance,
-               finalSplBalance
-             );
-             
-             logger.info('Child wallet balances updated after sell', {
-               walletPublicKey: wallet.public_key,
-               solBalance: finalSolBalance,
-               splBalance: finalSplBalance,
-               signature: result.data?.signature,
-               solBalanceSource: 'blockchain_api_verified',
-               splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_expected',
-               balanceUpdateMethod: 'both_sol_and_spl',
-               solBalanceVerified: true
-             });
-            
-            successfulSellUpdates++;
           }
+
+          await walletModel.updateChildWalletBalances(
+            wallet.public_key,
+            finalSolBalance,
+            finalSplBalance
+          );
+
+          logger.info('Child wallet balances updated after sell', {
+            requestId,
+            walletPublicKey: wallet.public_key,
+            solBalance: finalSolBalance,
+            splBalance: finalSplBalance,
+            signature: result.data?.signature,
+            solBalanceSource: 'blockchain_api_verified',
+            splBalanceSource: shouldUpdateSplBalance ? 'api_or_fallback' : 'calculated_expected'
+          });
+
+          successfulSellUpdates++;
+        } else {
+          if (result?.error?.includes('Insufficient balance') || result?.error?.includes('INSUFFICIENT_BALANCE')) {
+            const actualBalance = this.extractActualBalanceFromError(result.error);
+            if (actualBalance !== null && actualBalance < parseFloat(wallet.balance_sol)) {
+              balanceAdjustments.push({
+                publicKey: wallet.public_key,
+                newBalance: actualBalance
+              });
+            }
+          }
+
+          logger.error('Buy operation failed for child wallet', {
+            requestId,
+            walletPublicKey: wallet.public_key,
+            error: result?.error,
+            databaseBalance: parseFloat(wallet.balance_sol)
+          });
         }
       }
-      
-      // Log sell protection summary
+
+      for (const adjustment of balanceAdjustments) {
+        try {
+          await walletModel.updateChildWalletSolBalance(adjustment.publicKey, adjustment.newBalance);
+          logger.info('Updated child wallet balance based on blockchain feedback', {
+            requestId,
+            walletPublicKey: adjustment.publicKey,
+            newBalance: adjustment.newBalance
+          });
+        } catch (error) {
+          logger.error('Failed to update wallet balance', {
+            requestId,
+            walletPublicKey: adjustment.publicKey,
+            error: error.message
+          });
+        }
+      }
+
       if (sellWalletsNeedingVerification.length > 0) {
         logger.warn('Sell operations with SPL balance protection applied', {
+          requestId,
           totalSellOperations: sellResults.results.length,
           successfulUpdates: successfulSellUpdates,
           walletsNeedingVerification: sellWalletsNeedingVerification.length,
-          verificationDetails: sellWalletsNeedingVerification,
-          note: 'Some sell operations may need delayed verification due to API issues'
+          verificationDetails: sellWalletsNeedingVerification
         });
       }
 
-      // If 100% sell, transfer all SOL back and deactivate bundler
       if (sell_percent === 100) {
-        logger.info('100% sell - transferring SOL back and deactivating bundler');
+        logger.info('100% sell - transferring SOL back and deactivating bundler', {
+          requestId,
+          user_wallet_id,
+          distributorPublicKey
+        });
 
-        // Get updated child wallets after sell
         const updatedChildWallets = await bundlerModel.getChildWallets(bundler.id);
-        
-        // Calculate proper rent exemption (account rent + transaction fees)
-        const RENT_EXEMPTION = 0.00203928; // ~2.04 mSOL for account rent exemption
-        const TRANSACTION_FEE = 0.000005; // 5 microSOL for transaction fee
-        const MINIMUM_RESERVE = RENT_EXEMPTION + TRANSACTION_FEE; // ~0.002044 SOL total
-        
+
+        const RENT_EXEMPTION = 0.00203928;
+        const TRANSACTION_FEE = 0.000005;
+        const MINIMUM_RESERVE = RENT_EXEMPTION + TRANSACTION_FEE;
+
         const walletsWithSol = updatedChildWallets.filter(wallet => {
           const balance = parseFloat(wallet.balance_sol);
           const transferableAmount = balance - MINIMUM_RESERVE;
-          return transferableAmount > 0.0001; // Only transfer if meaningful amount after reserves
+          return transferableAmount > 0.0001;
         });
 
         if (walletsWithSol.length > 0) {
-          // Transfer all available SOL back to in-app wallet (keeping proper reserves)
           const transferBackOperations = walletsWithSol.map(wallet => {
             const balance = parseFloat(wallet.balance_sol);
             const transferAmount = Math.max(balance - MINIMUM_RESERVE, 0);
-            
+
             logger.info('Preparing SOL transfer back', {
+              requestId,
               wallet: wallet.public_key,
               totalBalance: balance,
               reserveAmount: MINIMUM_RESERVE,
-              transferAmount: transferAmount
+              transferAmount
             });
-            
+
             return {
               fromPublicKey: wallet.public_key,
-              toPublicKey: user.in_app_public_key,
+              toPublicKey: distributorPublicKey,
               amountSol: transferAmount,
               privateKey: wallet.private_key,
               commitment: 'confirmed'
@@ -1598,85 +1764,64 @@ class OrchestratorController {
           const transferResults = await solService.batchTransfer(
             transferBackOperations,
             `return-sol-${bundler.id}`,
-            2000 // 2 second delay between transfers to avoid rate limits
+            2000
           );
 
           logger.info('SOL transfer back completed', {
+            requestId,
             successful: transferResults.successful,
             failed: transferResults.failed,
             totalOperations: transferBackOperations.length
           });
 
-          // Log failed transfers for debugging
           if (transferResults.failed > 0) {
             logger.warn('Some SOL transfers failed during 100% sell cleanup', {
+              requestId,
               failedCount: transferResults.failed,
               errors: transferResults.errors
             });
           }
 
-          // Update user balance
-          const newUserBalance = await walletService.getSolBalance(user.in_app_public_key);
-          await userModel.updateSolBalance(user_wallet_id, newUserBalance.balanceSol);
-          
-          // CRITICAL: Update child wallet SOL balances to reflect the minimum reserve after transfers
-          logger.info('Updating child wallet balances after SOL transfer back to user', {
+          const newDistributorBalance = await walletService.getSolBalance(distributorPublicKey);
+          await userModel.updateDistributorBalances(
+            user_wallet_id,
+            newDistributorBalance.balanceSol,
+            user.distributor_balance_spl
+          );
+
+          logger.info('Updating child wallet balances after SOL transfer back to distributor', {
+            requestId,
             walletsToUpdate: walletsWithSol.length,
-            minimumReserve: MINIMUM_RESERVE,
-            strategy: 'post_transfer_balance_update'
+            minimumReserve: MINIMUM_RESERVE
           });
-          
-          const childWalletUpdates = walletsWithSol.map(async (wallet) => {
+
+          for (const wallet of walletsWithSol) {
             try {
-              // Update child wallet to show only the minimum reserve balance
               await walletModel.updateChildWalletSolBalance(wallet.public_key, MINIMUM_RESERVE);
-              
               logger.info('Child wallet SOL balance updated after transfer back', {
+                requestId,
                 walletPublicKey: wallet.public_key,
                 previousBalance: parseFloat(wallet.balance_sol),
-                newBalance: MINIMUM_RESERVE,
-                balanceReduction: parseFloat(wallet.balance_sol) - MINIMUM_RESERVE,
-                updateReason: 'sol_transferred_back_to_user'
+                newBalance: MINIMUM_RESERVE
               });
-              
-              return { publicKey: wallet.public_key, success: true };
             } catch (error) {
               logger.error('Failed to update child wallet balance after transfer back', {
+                requestId,
                 walletPublicKey: wallet.public_key,
                 error: error.message
               });
-              return { publicKey: wallet.public_key, success: false, error: error.message };
             }
-          });
-          
-          const updateResults = await Promise.all(childWalletUpdates);
-          const successfulUpdates = updateResults.filter(r => r.success).length;
-          const failedUpdates = updateResults.filter(r => !r.success).length;
-          
-          logger.info('Child wallet balance updates completed after SOL transfer back', {
-            totalUpdates: updateResults.length,
-            successful: successfulUpdates,
-            failed: failedUpdates,
-            minimumReserveSet: MINIMUM_RESERVE
-          });
-          
-          if (failedUpdates > 0) {
-            logger.warn('Some child wallet balance updates failed after SOL transfer', {
-              failedCount: failedUpdates,
-              failedWallets: updateResults.filter(r => !r.success)
-            });
           }
         }
 
-        // Deactivate bundler
         await bundlerModel.deactivateBundler(bundler.id);
       }
 
-      // Get final bundler state
       const finalBundler = await bundlerModel.getLatestActiveBundler(user_wallet_id);
-      const remainingSpl = finalBundler ? finalBundler.total_balance_spl : "0";
+      const remainingSpl = finalBundler ? finalBundler.total_balance_spl : '0';
 
       logger.info('Token sell completed', {
+        requestId,
         bundler_id: bundler.id,
         sell_percent,
         successful: sellResults.successful,
@@ -1692,7 +1837,6 @@ class OrchestratorController {
       next(error);
     }
   }
-
   /**
    * Sell SPL tokens from user's in-app wallet
    * POST /api/orchestrator/sell-spl-from-wallet
