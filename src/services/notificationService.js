@@ -3,7 +3,7 @@ const logger = require('../utils/logger');
 
 class NotificationService {
   constructor() {
-    this.frontendUrl = process.env.FRONTEND_URL || 'https://frontend-solanified.vercel.app';
+    this.frontendUrl = process.env.FRONTEND_URL || 'https://frontend-solanified.onrender.com';
     this.notificationClient = axios.create({
       timeout: 100000, // 10 seconds for notifications
       headers: {

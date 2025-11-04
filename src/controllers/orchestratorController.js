@@ -135,7 +135,7 @@ class OrchestratorController {
         requestId,
         user_wallet_id,
         distributor_public_key: distributorWallet.publicKey,
-        frontend_url: process.env.FRONTEND_URL || 'https://frontend-solanified.vercel.app'
+        frontend_url: process.env.FRONTEND_URL || 'https://frontend-solanified.onrender.com'
       });
 
       const notificationStart = Date.now();
