@@ -178,9 +178,10 @@ class ApiClient {
       return this.warmupPromise;
     }
 
-    const timeoutMs = Number(process.env.EXTERNAL_API_WARMUP_TIMEOUT_MS || 90000);
-    const cooldownMs = Number(process.env.EXTERNAL_API_WARMUP_COOLDOWN_MS || 20000);
-    const maxAttempts = Number(process.env.EXTERNAL_API_WARMUP_ATTEMPTS || 2);
+    const timeoutMs = Number(process.env.EXTERNAL_API_WARMUP_TIMEOUT_MS || 120000);
+    const cooldownMs = Number(process.env.EXTERNAL_API_WARMUP_COOLDOWN_MS || 30000);
+    const maxAttempts = Number(process.env.EXTERNAL_API_WARMUP_ATTEMPTS || 5);
+    const min429Delay = Number(process.env.EXTERNAL_API_WARMUP_429_DELAY_MS || 45000);
 
     this.warmupPromise = (async () => {
       try {
@@ -202,15 +203,13 @@ class ApiClient {
           const status = response?.status ?? 0;
 
           if (status === 429) {
-            const delay = cooldownMs * attempt;
-            logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Allowing cold start grace period', {
+            const delay = Math.max(min429Delay, cooldownMs * attempt);
+            logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Waiting for Render cold start window to expire', {
               attempt,
               delay_ms: delay
             });
             await this.sleep(delay);
-            this.lastWarmupTimestamp = Date.now();
-            logger.info('🔥 [API_CLIENT] Warm-up grace period completed after 429 response');
-            return;
+            continue;
           }
 
           if (status === 0 || status >= 500) {
