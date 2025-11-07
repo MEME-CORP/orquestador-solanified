@@ -178,119 +178,69 @@ class ApiClient {
       return this.warmupPromise;
     }
 
-    this.warmupPromise = this.performWarmupSequence();
+    const timeoutMs = Number(process.env.EXTERNAL_API_WARMUP_TIMEOUT_MS || 90000);
+    const cooldownMs = Number(process.env.EXTERNAL_API_WARMUP_COOLDOWN_MS || 20000);
+    const maxAttempts = Number(process.env.EXTERNAL_API_WARMUP_ATTEMPTS || 2);
 
-    try {
-      await this.warmupPromise;
-    } finally {
-      this.warmupPromise = null;
-    }
-  }
-
-  async performWarmupSequence() {
-    const maxAttempts = 6;
-    let lastStatus = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    this.warmupPromise = (async () => {
       try {
-        logger.info('🔥 [API_CLIENT] Warm-up HEAD ping to blockchain API', {
-          attempt,
-          maxAttempts
-        });
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          logger.info('🔥 [API_CLIENT] Warm-up request to blockchain API', {
+            attempt,
+            maxAttempts,
+            timeout_ms: timeoutMs
+          });
 
-        const headResponse = await this.client.request({
-          method: 'HEAD',
-          url: '/',
-          timeout: 20000,
-          __skipWarmup: true,
-          validateStatus: () => true
-        });
+          const response = await this.client.request({
+            method: 'GET',
+            url: '/',
+            timeout: timeoutMs,
+            __skipWarmup: true,
+            validateStatus: () => true
+          });
 
-        lastStatus = headResponse?.status ?? null;
+          const status = response?.status ?? 0;
 
-        if (this.isWarmupReadyStatus(lastStatus)) {
+          if (status === 429) {
+            if (attempt < maxAttempts) {
+              const delay = cooldownMs * attempt;
+              logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Cooling down before retry', {
+                attempt,
+                delay_ms: delay
+              });
+              await this.sleep(delay);
+              continue;
+            }
+            throw new Error('Warm-up blocked by rate limiting (429).');
+          }
+
+          if (status === 0 || status >= 500) {
+            throw new Error(`Warm-up failed with upstream status ${status}.`);
+          }
+
           this.lastWarmupTimestamp = Date.now();
-          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded via HEAD', {
-            status: lastStatus
+          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded', {
+            status
           });
           return;
         }
-
-        logger.warn('🔥 [API_CLIENT] Warm-up HEAD did not indicate readiness', {
-          status: lastStatus
-        });
       } catch (error) {
-        logger.warn('🔥 [API_CLIENT] Warm-up HEAD request failed', {
-          error: error.message
+        this.lastWarmupTimestamp = 0;
+        logger.error('🔥 [API_CLIENT] Blockchain API warm-up failed', {
+          error_message: error.message,
+          error_status: error.response?.status
         });
+        throw new AppError(
+          'The blockchain API is waking up but did not respond in time. Please retry in a minute.',
+          503,
+          'BLOCKCHAIN_API_WARMING_UP'
+        );
+      } finally {
+        this.warmupPromise = null;
       }
+    })();
 
-      try {
-        logger.info('🔥 [API_CLIENT] Warm-up GET ping to blockchain API', {
-          attempt,
-          maxAttempts
-        });
-
-        const getResponse = await this.client.request({
-          method: 'GET',
-          url: '/',
-          timeout: 20000,
-          __skipWarmup: true,
-          validateStatus: () => true
-        });
-
-        lastStatus = getResponse?.status ?? lastStatus;
-
-        if (this.isWarmupReadyStatus(lastStatus)) {
-          this.lastWarmupTimestamp = Date.now();
-          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded via GET', {
-            status: lastStatus
-          });
-          return;
-        }
-
-        logger.warn('🔥 [API_CLIENT] Warm-up GET did not indicate readiness', {
-          status: lastStatus
-        });
-      } catch (error) {
-        logger.warn('🔥 [API_CLIENT] Warm-up GET request failed', {
-          error: error.message
-        });
-      }
-
-      const delay = Math.pow(2, attempt - 1) * 5000; // 5s, 10s, 20s, 40s, 80s, 160s
-      logger.info('🔥 [API_CLIENT] Waiting before next warm-up attempt', {
-        attempt,
-        delay_ms: delay
-      });
-      await this.sleep(delay);
-    }
-
-    logger.error('🔥 [API_CLIENT] Blockchain API did not become ready after warm-up attempts', {
-      lastStatus
-    });
-
-    throw new AppError(
-      'Blockchain API is waking up. Please retry in a minute.',
-      503,
-      'BLOCKCHAIN_API_WARMING_UP'
-    );
-  }
-
-  isWarmupReadyStatus(status) {
-    if (status === null || status === undefined) {
-      return false;
-    }
-
-    if (status === 429) {
-      return false;
-    }
-
-    if (status >= 500) {
-      return false;
-    }
-
-    return true; // treat 2xx-4xx (except 429) as responsive
+    return this.warmupPromise;
   }
 }
 
