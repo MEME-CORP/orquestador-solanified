@@ -202,16 +202,15 @@ class ApiClient {
           const status = response?.status ?? 0;
 
           if (status === 429) {
-            if (attempt < maxAttempts) {
-              const delay = cooldownMs * attempt;
-              logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Cooling down before retry', {
-                attempt,
-                delay_ms: delay
-              });
-              await this.sleep(delay);
-              continue;
-            }
-            throw new Error('Warm-up blocked by rate limiting (429).');
+            const delay = cooldownMs * attempt;
+            logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Allowing cold start grace period', {
+              attempt,
+              delay_ms: delay
+            });
+            await this.sleep(delay);
+            this.lastWarmupTimestamp = Date.now();
+            logger.info('🔥 [API_CLIENT] Warm-up grace period completed after 429 response');
+            return;
           }
 
           if (status === 0 || status >= 500) {
