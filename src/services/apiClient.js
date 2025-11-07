@@ -8,13 +8,24 @@ class ApiClient {
     this.warmupPromise = null;
     this.WARMUP_TTL_MS = 5 * 60 * 1000; // cache warm state for 5 minutes
 
+    const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
+    const defaultHeaders = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.EXTERNAL_API_KEY || ''}`
+    };
+
     this.client = axios.create({
-      baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
+      baseURL,
       timeout: 120000, // 2 minutes for blockchain operations (increased from 30s)
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.EXTERNAL_API_KEY || ''}`
-      }
+      headers: defaultHeaders
+    });
+
+    // Dedicated warm-up client without interceptors or automatic retries
+    this.warmupClient = axios.create({
+      baseURL,
+      timeout: 120000,
+      headers: defaultHeaders,
+      validateStatus: () => true
     });
 
     // Request interceptor for logging and idempotency
@@ -192,12 +203,10 @@ class ApiClient {
             timeout_ms: timeoutMs
           });
 
-          const response = await this.client.request({
+          const response = await this.warmupClient.request({
             method: 'GET',
             url: '/',
-            timeout: timeoutMs,
-            __skipWarmup: true,
-            validateStatus: () => true
+            timeout: timeoutMs
           });
 
           const status = response?.status ?? 0;
@@ -222,6 +231,8 @@ class ApiClient {
           });
           return;
         }
+
+        throw new Error('Warm-up attempts exhausted without a healthy response.');
       } catch (error) {
         this.lastWarmupTimestamp = 0;
         logger.error('🔥 [API_CLIENT] Blockchain API warm-up failed', {
