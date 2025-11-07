@@ -166,12 +166,20 @@ class OrchestratorController {
       const notificationTime = Date.now() - notificationStart;
 
       // Step 6: Prepare response
+      const DEV_WALLET_CREATION_DELAY_MS = 2 * 60 * 1000;
       const totalTime = Date.now() - startTime;
+      const devWalletStatus = existingDevKey ? 'ready' : 'pending';
       const response = {
         distributor_public_key: distributorWallet.publicKey,
-        // Maintain backward-compatible alias for existing clients expecting in_app_public_key
+        distributor_balance_sol: '0',
+        distributor_balance: 0,
+        // Maintain backward-compatible alias for existing clients expecting in_app_* fields
         in_app_public_key: distributorWallet.publicKey,
-        balance_sol: "0"
+        balance_sol: '0',
+        balance: 0,
+        dev_public_key: existingDevKey || null,
+        dev_wallet_status: devWalletStatus,
+        dev_wallet_ready_in_seconds: existingDevKey ? 0 : DEV_WALLET_CREATION_DELAY_MS / 1000
       };
 
       logger.info('🎉 [CREATE_WALLET_IN_APP] Request completed successfully', {
@@ -186,8 +194,6 @@ class OrchestratorController {
       });
 
       res.json(response);
-
-      const DEV_WALLET_CREATION_DELAY_MS = 2 * 60 * 1000;
 
       const scheduleDevWalletCreation = () => {
         if (existingDevKey) {
