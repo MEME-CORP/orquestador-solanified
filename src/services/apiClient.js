@@ -46,28 +46,27 @@ class ApiClient {
         return response;
       },
       async (error) => {
-        const originalRequest = error.config;
+        const originalRequest = error.config || {};
 
-        // Log the error
         logger.error('API Error:', {
           status: error.response?.status,
-          url: error.config?.url,
-          method: error.config?.method?.toUpperCase(),
+          url: originalRequest.url,
+          method: originalRequest.method?.toUpperCase(),
           message: error.response?.data?.error?.message || error.message
         });
 
-        // Enhanced retry logic for 5xx errors, network issues, and rate limiting
-        if (this.shouldRetry(error) && !originalRequest._retry) {
-          const maxRetries = this.isRateLimitError(error) ? 5 : 3; // More retries for rate limits
-          
+        if (this.shouldRetry(error)) {
+          const isRateLimit = this.isRateLimitError(error);
+          const maxRetries = isRateLimit ? 5 : 3;
+
+          originalRequest._retryCount = originalRequest._retryCount || 0;
+
           if (originalRequest._retryCount < maxRetries) {
-            originalRequest._retry = true;
-            originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
+            originalRequest._retryCount += 1;
 
             let delay;
-            if (this.isRateLimitError(error)) {
-              // For rate limiting: use longer, more aggressive backoff
-              delay = Math.pow(2, originalRequest._retryCount) * 2000 + Math.random() * 1000; // 2s, 4s, 8s, 16s, 32s + jitter
+            if (isRateLimit) {
+              delay = Math.pow(2, originalRequest._retryCount) * 2000 + Math.random() * 1000;
               logger.warn(`Rate limit hit, retrying request in ${delay}ms (attempt ${originalRequest._retryCount}/${maxRetries})`, {
                 url: originalRequest.url,
                 method: originalRequest.method,
@@ -75,8 +74,7 @@ class ApiClient {
                 errorMessage: error.response?.data?.error || error.message
               });
             } else {
-              // For server errors: standard exponential backoff
-              delay = Math.pow(2, originalRequest._retryCount) * 1000; // 2s, 4s, 8s
+              delay = Math.pow(2, originalRequest._retryCount) * 1000;
               logger.info(`Server error, retrying request in ${delay}ms (attempt ${originalRequest._retryCount}/${maxRetries})`, {
                 url: originalRequest.url,
                 status: error.response?.status
@@ -84,17 +82,14 @@ class ApiClient {
             }
 
             await this.sleep(delay);
-            
-            // Reset the retry flag for the next attempt
-            originalRequest._retry = false;
             return this.client(originalRequest);
-          } else {
-            logger.error(`Max retries (${maxRetries}) exceeded for request`, {
-              url: originalRequest.url,
-              method: originalRequest.method,
-              finalError: error.response?.data?.error || error.message
-            });
           }
+
+          logger.error(`Max retries (${maxRetries}) exceeded for request`, {
+            url: originalRequest.url,
+            method: originalRequest.method,
+            finalError: error.response?.data?.error || error.message
+          });
         }
 
         return Promise.reject(error);
