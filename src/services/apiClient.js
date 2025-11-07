@@ -1,8 +1,13 @@
 const axios = require('axios');
 const logger = require('../utils/logger');
+const { AppError } = require('../middleware/errorHandler');
 
 class ApiClient {
   constructor() {
+    this.lastWarmupTimestamp = 0;
+    this.warmupPromise = null;
+    this.WARMUP_TTL_MS = 5 * 60 * 1000; // cache warm state for 5 minutes
+
     this.client = axios.create({
       baseURL: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
       timeout: 120000, // 2 minutes for blockchain operations (increased from 30s)
@@ -14,7 +19,13 @@ class ApiClient {
 
     // Request interceptor for logging and idempotency
     this.client.interceptors.request.use(
-      (config) => {
+      async (config) => {
+        if (!config.__skipWarmup) {
+          await this.ensureExternalApiReady();
+        } else {
+          delete config.__skipWarmup; // internal requests bypass warm-up checks
+        }
+
         // Add idempotency key if provided
         if (config.idempotencyKey) {
           config.headers['X-Idempotency-Key'] = config.idempotencyKey;
@@ -150,9 +161,136 @@ class ApiClient {
 
   async requestRaw(config = {}) {
     return this.client.request({
+      __skipWarmup: true,
       validateStatus: () => true,
       ...config
     });
+  }
+
+  async ensureExternalApiReady(force = false) {
+    const now = Date.now();
+
+    if (!force && this.lastWarmupTimestamp && now - this.lastWarmupTimestamp < this.WARMUP_TTL_MS) {
+      return;
+    }
+
+    if (this.warmupPromise) {
+      return this.warmupPromise;
+    }
+
+    this.warmupPromise = this.performWarmupSequence();
+
+    try {
+      await this.warmupPromise;
+    } finally {
+      this.warmupPromise = null;
+    }
+  }
+
+  async performWarmupSequence() {
+    const maxAttempts = 6;
+    let lastStatus = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        logger.info('🔥 [API_CLIENT] Warm-up HEAD ping to blockchain API', {
+          attempt,
+          maxAttempts
+        });
+
+        const headResponse = await this.client.request({
+          method: 'HEAD',
+          url: '/',
+          timeout: 20000,
+          __skipWarmup: true,
+          validateStatus: () => true
+        });
+
+        lastStatus = headResponse?.status ?? null;
+
+        if (this.isWarmupReadyStatus(lastStatus)) {
+          this.lastWarmupTimestamp = Date.now();
+          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded via HEAD', {
+            status: lastStatus
+          });
+          return;
+        }
+
+        logger.warn('🔥 [API_CLIENT] Warm-up HEAD did not indicate readiness', {
+          status: lastStatus
+        });
+      } catch (error) {
+        logger.warn('🔥 [API_CLIENT] Warm-up HEAD request failed', {
+          error: error.message
+        });
+      }
+
+      try {
+        logger.info('🔥 [API_CLIENT] Warm-up GET ping to blockchain API', {
+          attempt,
+          maxAttempts
+        });
+
+        const getResponse = await this.client.request({
+          method: 'GET',
+          url: '/',
+          timeout: 20000,
+          __skipWarmup: true,
+          validateStatus: () => true
+        });
+
+        lastStatus = getResponse?.status ?? lastStatus;
+
+        if (this.isWarmupReadyStatus(lastStatus)) {
+          this.lastWarmupTimestamp = Date.now();
+          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded via GET', {
+            status: lastStatus
+          });
+          return;
+        }
+
+        logger.warn('🔥 [API_CLIENT] Warm-up GET did not indicate readiness', {
+          status: lastStatus
+        });
+      } catch (error) {
+        logger.warn('🔥 [API_CLIENT] Warm-up GET request failed', {
+          error: error.message
+        });
+      }
+
+      const delay = Math.pow(2, attempt - 1) * 5000; // 5s, 10s, 20s, 40s, 80s, 160s
+      logger.info('🔥 [API_CLIENT] Waiting before next warm-up attempt', {
+        attempt,
+        delay_ms: delay
+      });
+      await this.sleep(delay);
+    }
+
+    logger.error('🔥 [API_CLIENT] Blockchain API did not become ready after warm-up attempts', {
+      lastStatus
+    });
+
+    throw new AppError(
+      'Blockchain API is waking up. Please retry in a minute.',
+      503,
+      'BLOCKCHAIN_API_WARMING_UP'
+    );
+  }
+
+  isWarmupReadyStatus(status) {
+    if (status === null || status === undefined) {
+      return false;
+    }
+
+    if (status === 429) {
+      return false;
+    }
+
+    if (status >= 500) {
+      return false;
+    }
+
+    return true; // treat 2xx-4xx (except 429) as responsive
   }
 }
 
