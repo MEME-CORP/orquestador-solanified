@@ -147,6 +147,13 @@ class ApiClient {
     const response = await this.client.delete(url, config);
     return response.data;
   }
+
+  async requestRaw(config = {}) {
+    return this.client.request({
+      validateStatus: () => true,
+      ...config
+    });
+  }
 }
 
 module.exports = new ApiClient();

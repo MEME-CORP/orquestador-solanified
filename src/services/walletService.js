@@ -4,6 +4,12 @@ const { AppError } = require('../middleware/errorHandler');
 const ApiResponseValidator = require('../utils/apiResponseValidator');
 
 class WalletService {
+  constructor() {
+    this.lastWarmupTimestamp = 0;
+    this.warmupPromise = null;
+    this.WARMUP_TTL_MS = 2 * 60 * 1000; // cache warm state for 2 minutes
+  }
+
   /**
    * Create a new Solana wallet
    * @param {number} count - Number of wallets to create (default: 1)
@@ -13,6 +19,8 @@ class WalletService {
     const requestStart = Date.now();
     
     try {
+      await this.ensureExternalApiReady();
+
       logger.info('🔗 [WALLET_SERVICE] Initiating wallet creation request', {
         count,
         api_url: process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com',
@@ -95,6 +103,123 @@ class WalletService {
 
       throw new AppError(errorMessage, 502, errorCode);
     }
+  }
+
+  async ensureExternalApiReady(force = false) {
+    const now = Date.now();
+
+    if (!force && now - this.lastWarmupTimestamp < this.WARMUP_TTL_MS) {
+      return;
+    }
+
+    if (this.warmupPromise) {
+      return this.warmupPromise;
+    }
+
+    this.warmupPromise = this.performWarmupSequence();
+
+    try {
+      await this.warmupPromise;
+    } finally {
+      this.warmupPromise = null;
+    }
+  }
+
+  async performWarmupSequence() {
+    const maxAttempts = 6;
+    let lastStatus = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        logger.info('🔥 [WALLET_SERVICE] Warm-up ping to blockchain API', {
+          attempt,
+          maxAttempts
+        });
+
+        const headResponse = await apiClient.requestRaw({
+          method: 'HEAD',
+          url: '/health',
+          timeout: 20000
+        });
+
+        lastStatus = headResponse?.status ?? null;
+
+        if (this.isWarmupReadyStatus(lastStatus)) {
+          this.lastWarmupTimestamp = Date.now();
+          logger.info('🔥 [WALLET_SERVICE] Blockchain API warm-up succeeded via HEAD', {
+            status: lastStatus
+          });
+          return;
+        }
+
+        logger.warn('🔥 [WALLET_SERVICE] Warm-up HEAD did not indicate readiness', {
+          status: lastStatus
+        });
+      } catch (error) {
+        logger.warn('🔥 [WALLET_SERVICE] Warm-up HEAD request failed', {
+          error: error.message
+        });
+      }
+
+      try {
+        const getResponse = await apiClient.requestRaw({
+          method: 'GET',
+          url: '/health',
+          timeout: 20000
+        });
+
+        lastStatus = getResponse?.status ?? lastStatus;
+
+        if (this.isWarmupReadyStatus(lastStatus)) {
+          this.lastWarmupTimestamp = Date.now();
+          logger.info('🔥 [WALLET_SERVICE] Blockchain API warm-up succeeded via GET', {
+            status: lastStatus
+          });
+          return;
+        }
+
+        logger.warn('🔥 [WALLET_SERVICE] Warm-up GET did not indicate readiness', {
+          status: lastStatus
+        });
+      } catch (error) {
+        logger.warn('🔥 [WALLET_SERVICE] Warm-up GET request failed', {
+          error: error.message
+        });
+      }
+
+      const delay = Math.pow(2, attempt - 1) * 5000; // 5s, 10s, 20s, 40s, 80s, 160s
+      logger.info('🔥 [WALLET_SERVICE] Waiting before next warm-up attempt', {
+        attempt,
+        delay_ms: delay
+      });
+      await this.sleep(delay);
+    }
+
+    logger.error('🔥 [WALLET_SERVICE] Blockchain API did not become ready after warm-up attempts', {
+      lastStatus
+    });
+
+    throw new AppError(
+      'Blockchain API is waking up. Please retry in a minute.',
+      503,
+      'BLOCKCHAIN_API_WARMING_UP'
+    );
+  }
+
+  isWarmupReadyStatus(status) {
+    if (status === null || status === undefined) {
+      return false;
+    }
+
+    if (status === 429) {
+      return false;
+    }
+
+    if (status >= 500) {
+      return false;
+    }
+
+    return true; // treat 2xx-4xx (except 429) as signal that service is responsive
   }
 
   /**
