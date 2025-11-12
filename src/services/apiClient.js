@@ -20,6 +20,9 @@ class ApiClient {
     );
     this.rateLimitWarmupOnRetry = process.env.EXTERNAL_API_RATE_LIMIT_WARMUP !== 'false';
     this.userAgent = process.env.EXTERNAL_API_USER_AGENT || 'curl/8.5.0';
+    this.healthCheckPath = process.env.EXTERNAL_API_HEALTHZ_PATH || '/';
+    this.routerWarmupTimeoutMs = Number(process.env.EXTERNAL_API_ROUTER_WARMUP_TIMEOUT_MS || 75000);
+    this.routerWarmCooldownMs = Number(process.env.EXTERNAL_API_ROUTER_WARMUP_COOLDOWN_MS || 120000);
 
     const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
     const apiKey = process.env.EXTERNAL_API_KEY ? String(process.env.EXTERNAL_API_KEY).trim() : '';
@@ -75,7 +78,7 @@ class ApiClient {
             request_has_idempotency_key: Boolean(config.idempotencyKey)
           });
 
-          const warmupContext = await this.ensureExternalApiReady();
+          const warmupContext = await this.ensureExternalApiReady({ reason: 'request_interceptor' });
           if (warmupContext?.warmupRunId) {
             config.__warmupRunId = warmupContext.warmupRunId;
           }
@@ -121,6 +124,7 @@ class ApiClient {
         const renderRoutingHeader = this.getRenderRoutingHeader(error.response?.headers);
         const retryAfterHeader = this.getRetryAfterHeader(error.response?.headers);
         const routerSuggestedDelay = this.getRenderRoutingDelay(renderRoutingHeader, retryAfterHeader);
+        const routerBlocked = this.isRenderRouterBlocked(error.response?.status, renderRoutingHeader);
 
         logger.error('API Error:', {
           status: error.response?.status,
@@ -132,6 +136,61 @@ class ApiClient {
           render_routing: renderRoutingHeader,
           retry_after_header: retryAfterHeader
         });
+
+        if (error.response?.status === 429 && routerBlocked) {
+          if (originalRequest.__routerWarmAttempted) {
+            logger.warn('🔥 [API_CLIENT] Router 429 persisted after warm-up attempt, aborting retries', {
+              url: originalRequest.url,
+              method: originalRequest.method,
+              warmup_run_id: originalRequest.__warmupRunId || null,
+              render_routing: renderRoutingHeader,
+              retry_after_header: retryAfterHeader
+            });
+            return Promise.reject(error);
+          }
+
+          originalRequest.__routerWarmAttempted = true;
+
+          if (routerSuggestedDelay) {
+            this.diagLog('info', '🔥 [API_CLIENT] Honoring router suggested delay before warm-up', {
+              delay_ms: routerSuggestedDelay,
+              render_routing: renderRoutingHeader,
+              retry_after_header: retryAfterHeader || null
+            });
+            await this.sleep(routerSuggestedDelay);
+          }
+
+          try {
+            const warmupContext = await this.ensureExternalApiReady({
+              force: true,
+              bypassModeCheck: true,
+              reason: 'router_rate_limit',
+              timeoutOverrideMs: this.routerWarmupTimeoutMs
+            });
+
+            if (warmupContext?.warmupRunId) {
+              originalRequest.__warmupRunId = warmupContext.warmupRunId;
+            }
+
+            logger.info('🔥 [API_CLIENT] Render router warm-up completed, retrying request once', {
+              url: originalRequest.url,
+              method: originalRequest.method,
+              warmup_run_id: warmupContext?.warmupRunId || null
+            });
+          } catch (warmupError) {
+            logger.error('🔥 [API_CLIENT] Render router warm-up failed', {
+              url: originalRequest.url,
+              method: originalRequest.method,
+              error_message: warmupError.message,
+              render_routing: renderRoutingHeader,
+              warmup_run_id: warmupError.warmupRunId || null
+            });
+            return Promise.reject(error);
+          }
+
+          originalRequest.__skipWarmup = true;
+          return this.client(originalRequest);
+        }
 
         if (this.shouldRetry(error)) {
           const isRateLimit = this.isRateLimitError(error);
@@ -149,7 +208,10 @@ class ApiClient {
 
               if (this.rateLimitWarmupOnRetry) {
                 try {
-                  const warmupContext = await this.ensureExternalApiReady(true);
+                  const warmupContext = await this.ensureExternalApiReady({
+                    force: true,
+                    reason: 'rate_limit_retry'
+                  });
                   if (warmupContext?.warmupRunId) {
                     originalRequest.__warmupRunId = warmupContext.warmupRunId;
                   }
@@ -256,8 +318,19 @@ class ApiClient {
     });
   }
 
-  async ensureExternalApiReady(force = false) {
-    if (this.warmupMode !== 'active') {
+  async ensureExternalApiReady(options = {}) {
+    if (typeof options === 'boolean') {
+      options = { force: options };
+    }
+
+    const {
+      force = false,
+      bypassModeCheck = false,
+      reason = 'unspecified',
+      timeoutOverrideMs
+    } = options;
+
+    if (!bypassModeCheck && this.warmupMode !== 'active') {
       return {
         warmupSkipped: true,
         warmupMode: this.warmupMode,
@@ -271,7 +344,8 @@ class ApiClient {
       this.diagLog('info', '🔥 [API_CLIENT] Warm-up skipped - cached warm state still valid', {
         warm_state_age_ms: now - this.lastWarmupTimestamp,
         warmup_run_id: this.lastWarmupRunId,
-        ttl_ms: this.WARMUP_TTL_MS
+        ttl_ms: this.WARMUP_TTL_MS,
+        reason
       });
       return {
         warmupCached: true,
@@ -283,7 +357,7 @@ class ApiClient {
       return this.warmupPromise;
     }
 
-    const timeoutMs = Number(process.env.EXTERNAL_API_WARMUP_TIMEOUT_MS || 120000);
+    const timeoutMs = timeoutOverrideMs || Number(process.env.EXTERNAL_API_WARMUP_TIMEOUT_MS || 120000);
     const cooldownMs = Number(process.env.EXTERNAL_API_WARMUP_COOLDOWN_MS || 30000);
     const maxAttempts = Number(process.env.EXTERNAL_API_WARMUP_ATTEMPTS || 5);
     const min429Delay = Number(process.env.EXTERNAL_API_WARMUP_429_DELAY_MS || 45000);
@@ -294,7 +368,9 @@ class ApiClient {
       warmup_run_id: warmupRunId,
       warmups_inflight: this.activeWarmups,
       force,
-      ttl_ms: this.WARMUP_TTL_MS
+      ttl_ms: this.WARMUP_TTL_MS,
+      reason,
+      timeout_ms: timeoutMs
     });
 
     this.warmupPromise = (async () => {
@@ -311,7 +387,7 @@ class ApiClient {
 
           const response = await this.warmupClient.request({
             method: 'GET',
-            url: '/',
+            url: this.healthCheckPath,
             timeout: timeoutMs
           });
 
@@ -404,6 +480,19 @@ class ApiClient {
     })();
 
     return this.warmupPromise;
+  }
+
+  isRenderRouterBlocked(status, renderRoutingHeader) {
+    if (status !== 429 && status !== 503) {
+      return false;
+    }
+
+    if (!renderRoutingHeader) {
+      return false;
+    }
+
+    const headerValue = renderRoutingHeader.toLowerCase();
+    return headerValue.includes('rate-limited') || headerValue.includes('dynamic-hibernate') || headerValue.includes('hibernate');
   }
 
   diagLog(level, message, metadata = {}) {
