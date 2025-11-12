@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { randomUUID } = require('crypto');
 const logger = require('../utils/logger');
 const { AppError } = require('../middleware/errorHandler');
 
@@ -7,6 +8,8 @@ class ApiClient {
     this.lastWarmupTimestamp = 0;
     this.warmupPromise = null;
     this.WARMUP_TTL_MS = 5 * 60 * 1000; // cache warm state for 5 minutes
+    this.activeWarmups = 0;
+    this.DIAGNOSTICS_ENABLED = process.env.EXTERNAL_API_WARMUP_DIAGNOSTICS === 'true';
 
     const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
     const defaultHeaders = {
@@ -32,6 +35,15 @@ class ApiClient {
     this.client.interceptors.request.use(
       async (config) => {
         if (!config.__skipWarmup) {
+          const warmStateAge = this.lastWarmupTimestamp ? Date.now() - this.lastWarmupTimestamp : null;
+          this.diagLog('info', '🔥 [API_CLIENT] Warm-up check prior to outbound request', {
+            url: config.url,
+            method: config.method?.toUpperCase(),
+            warm_state_age_ms: warmStateAge,
+            warmup_inflight: this.activeWarmups,
+            request_has_idempotency_key: Boolean(config.idempotencyKey)
+          });
+
           await this.ensureExternalApiReady();
         } else {
           delete config.__skipWarmup; // internal requests bypass warm-up checks
@@ -194,13 +206,25 @@ class ApiClient {
     const maxAttempts = Number(process.env.EXTERNAL_API_WARMUP_ATTEMPTS || 5);
     const min429Delay = Number(process.env.EXTERNAL_API_WARMUP_429_DELAY_MS || 45000);
 
+    const warmupRunId = randomUUID();
+    this.activeWarmups += 1;
+    this.diagLog('info', '🔥 [API_CLIENT] Warm-up sequence started', {
+      warmup_run_id: warmupRunId,
+      warmups_inflight: this.activeWarmups,
+      force,
+      ttl_ms: this.WARMUP_TTL_MS
+    });
+
     this.warmupPromise = (async () => {
       try {
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          logger.info('🔥 [API_CLIENT] Warm-up request to blockchain API', {
+          const attemptStartedAt = Date.now();
+          this.diagLog('info', '🔥 [API_CLIENT] Warm-up request to blockchain API', {
             attempt,
             maxAttempts,
-            timeout_ms: timeoutMs
+            timeout_ms: timeoutMs,
+            warmup_run_id: warmupRunId,
+            warmups_inflight: this.activeWarmups
           });
 
           const response = await this.warmupClient.request({
@@ -210,24 +234,41 @@ class ApiClient {
           });
 
           const status = response?.status ?? 0;
+          const attemptDuration = Date.now() - attemptStartedAt;
+          const retryAfter = response?.headers?.['retry-after'] || response?.headers?.['Retry-After'];
 
           if (status === 429) {
             const delay = Math.max(min429Delay, cooldownMs * attempt);
-            logger.warn('🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Waiting for Render cold start window to expire', {
+            this.diagLog('warn', '🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Waiting for Render cold start window to expire', {
               attempt,
-              delay_ms: delay
+              delay_ms: delay,
+              warmup_run_id: warmupRunId,
+              attempt_duration_ms: attemptDuration,
+              retry_after_header: retryAfter || null
             });
             await this.sleep(delay);
             continue;
           }
 
           if (status === 0 || status >= 500) {
+            const errorPayload = {
+              status,
+              warmup_run_id: warmupRunId,
+              attempt,
+              attempt_duration_ms: attemptDuration,
+              response_body_sample: this.safeSampleBody(response?.data)
+            };
+            this.diagLog('error', '🔥 [API_CLIENT] Warm-up received unhealthy upstream response', errorPayload);
             throw new Error(`Warm-up failed with upstream status ${status}.`);
           }
 
           this.lastWarmupTimestamp = Date.now();
-          logger.info('🔥 [API_CLIENT] Blockchain API warm-up succeeded', {
-            status
+          this.diagLog('info', '🔥 [API_CLIENT] Blockchain API warm-up succeeded', {
+            status,
+            warmup_run_id: warmupRunId,
+            attempt,
+            attempt_duration_ms: attemptDuration,
+            warmups_inflight: this.activeWarmups - 1
           });
           return;
         }
@@ -235,9 +276,10 @@ class ApiClient {
         throw new Error('Warm-up attempts exhausted without a healthy response.');
       } catch (error) {
         this.lastWarmupTimestamp = 0;
-        logger.error('🔥 [API_CLIENT] Blockchain API warm-up failed', {
+        this.diagLog('error', '🔥 [API_CLIENT] Blockchain API warm-up failed', {
           error_message: error.message,
-          error_status: error.response?.status
+          error_status: error.response?.status,
+          warmup_run_id: warmupRunId
         });
         throw new AppError(
           'The blockchain API is waking up but did not respond in time. Please retry in a minute.',
@@ -246,10 +288,48 @@ class ApiClient {
         );
       } finally {
         this.warmupPromise = null;
+        this.activeWarmups = Math.max(0, this.activeWarmups - 1);
+        this.diagLog('info', '🔥 [API_CLIENT] Warm-up sequence finished', {
+          warmup_run_id: warmupRunId,
+          warmups_inflight: this.activeWarmups
+        });
       }
     })();
 
     return this.warmupPromise;
+  }
+
+  diagLog(level, message, metadata = {}) {
+    if (!this.DIAGNOSTICS_ENABLED) {
+      return;
+    }
+
+    const payload = {
+      ...metadata,
+      service: 'bundler-orchestrator'
+    };
+
+    if (logger[level]) {
+      logger[level](message, payload);
+    } else {
+      logger.info(message, payload);
+    }
+  }
+
+  safeSampleBody(data) {
+    if (!data) {
+      return null;
+    }
+
+    try {
+      if (typeof data === 'string') {
+        return data.slice(0, 200);
+      }
+
+      return JSON.stringify(data).slice(0, 200);
+    } catch (error) {
+      return '[unserializable response body]';
+    }
   }
 }
 
