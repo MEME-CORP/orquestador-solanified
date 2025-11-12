@@ -12,6 +12,11 @@ class ApiClient {
     this.DIAGNOSTICS_ENABLED = process.env.EXTERNAL_API_WARMUP_DIAGNOSTICS === 'true';
     this.warmupMode = (process.env.EXTERNAL_API_WARMUP_MODE || 'active').toLowerCase();
     this.lastWarmupRunId = null;
+    this.rateLimitDelaysMs = this.parseDelays(
+      process.env.EXTERNAL_API_RATE_LIMIT_DELAYS_MS,
+      [45000, 60000, 90000, 120000, 150000]
+    );
+    this.rateLimitWarmupOnRetry = process.env.EXTERNAL_API_RATE_LIMIT_WARMUP !== 'false';
 
     const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
     const defaultHeaders = {
@@ -96,18 +101,20 @@ class ApiClient {
       },
       async (error) => {
         const originalRequest = error.config || {};
+        const responseBodySample = this.safeSampleBody(error.response?.data);
 
         logger.error('API Error:', {
           status: error.response?.status,
           url: originalRequest.url,
           method: originalRequest.method?.toUpperCase(),
           message: error.response?.data?.error?.message || error.message,
-          warmup_run_id: originalRequest.__warmupRunId || null
+          warmup_run_id: originalRequest.__warmupRunId || null,
+          response_body_sample: responseBodySample
         });
 
         if (this.shouldRetry(error)) {
           const isRateLimit = this.isRateLimitError(error);
-          const maxRetries = isRateLimit ? 5 : 3;
+          const maxRetries = isRateLimit ? this.rateLimitDelaysMs.length : 3;
 
           originalRequest._retryCount = originalRequest._retryCount || 0;
 
@@ -116,18 +123,38 @@ class ApiClient {
 
             let delay;
             if (isRateLimit) {
-              delay = Math.pow(2, originalRequest._retryCount) * 2000 + Math.random() * 1000;
+              const attemptIndex = originalRequest._retryCount - 1;
+              delay = this.getRateLimitDelay(attemptIndex);
+
+              if (this.rateLimitWarmupOnRetry) {
+                try {
+                  const warmupContext = await this.ensureExternalApiReady(true);
+                  if (warmupContext?.warmupRunId) {
+                    originalRequest.__warmupRunId = warmupContext.warmupRunId;
+                  }
+                } catch (warmupError) {
+                  logger.warn('🔥 [API_CLIENT] Warm-up during rate-limit retry failed', {
+                    retry_attempt: originalRequest._retryCount,
+                    error_message: warmupError.message,
+                    warmup_run_id: warmupError.warmupRunId || null
+                  });
+                }
+              }
+
               logger.warn(`Rate limit hit, retrying request in ${delay}ms (attempt ${originalRequest._retryCount}/${maxRetries})`, {
                 url: originalRequest.url,
                 method: originalRequest.method,
                 status: error.response?.status,
-                errorMessage: error.response?.data?.error || error.message
+                errorMessage: error.response?.data?.error || error.message,
+                warmup_run_id: originalRequest.__warmupRunId || null,
+                response_body_sample: responseBodySample
               });
             } else {
               delay = Math.pow(2, originalRequest._retryCount) * 1000;
               logger.info(`Server error, retrying request in ${delay}ms (attempt ${originalRequest._retryCount}/${maxRetries})`, {
                 url: originalRequest.url,
-                status: error.response?.status
+                status: error.response?.status,
+                warmup_run_id: originalRequest.__warmupRunId || null
               });
             }
 
@@ -377,6 +404,24 @@ class ApiClient {
     } catch (error) {
       return '[unserializable response body]';
     }
+  }
+
+  parseDelays(envValue, fallback) {
+    if (!envValue) {
+      return fallback;
+    }
+
+    const parsed = envValue
+      .split(',')
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    return parsed.length ? parsed : fallback;
+  }
+
+  getRateLimitDelay(attemptIndex) {
+    const clampedIndex = Math.min(attemptIndex, this.rateLimitDelaysMs.length - 1);
+    return this.rateLimitDelaysMs[clampedIndex];
   }
 }
 
