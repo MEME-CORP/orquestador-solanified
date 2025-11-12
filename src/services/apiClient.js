@@ -118,6 +118,9 @@ class ApiClient {
       async (error) => {
         const originalRequest = error.config || {};
         const responseBodySample = this.safeSampleBody(error.response?.data);
+        const renderRoutingHeader = this.getRenderRoutingHeader(error.response?.headers);
+        const retryAfterHeader = this.getRetryAfterHeader(error.response?.headers);
+        const routerSuggestedDelay = this.getRenderRoutingDelay(renderRoutingHeader, retryAfterHeader);
 
         logger.error('API Error:', {
           status: error.response?.status,
@@ -125,7 +128,9 @@ class ApiClient {
           method: originalRequest.method?.toUpperCase(),
           message: error.response?.data?.error?.message || error.message,
           warmup_run_id: originalRequest.__warmupRunId || null,
-          response_body_sample: responseBodySample
+          response_body_sample: responseBodySample,
+          render_routing: renderRoutingHeader,
+          retry_after_header: retryAfterHeader
         });
 
         if (this.shouldRetry(error)) {
@@ -140,7 +145,7 @@ class ApiClient {
             let delay;
             if (isRateLimit) {
               const attemptIndex = originalRequest._retryCount - 1;
-              delay = this.getRateLimitDelay(attemptIndex);
+              delay = routerSuggestedDelay ?? this.getRateLimitDelay(attemptIndex);
 
               if (this.rateLimitWarmupOnRetry) {
                 try {
@@ -163,7 +168,9 @@ class ApiClient {
                 status: error.response?.status,
                 errorMessage: error.response?.data?.error || error.message,
                 warmup_run_id: originalRequest.__warmupRunId || null,
-                response_body_sample: responseBodySample
+                response_body_sample: responseBodySample,
+                render_routing: renderRoutingHeader,
+                retry_after_header: retryAfterHeader
               });
             } else {
               delay = Math.pow(2, originalRequest._retryCount) * 1000;
@@ -310,18 +317,21 @@ class ApiClient {
 
           const status = response?.status ?? 0;
           const attemptDuration = Date.now() - attemptStartedAt;
-          const retryAfter = response?.headers?.['retry-after'] || response?.headers?.['Retry-After'];
+          const renderRoutingHeader = this.getRenderRoutingHeader(response?.headers);
+          const retryAfterHeader = this.getRetryAfterHeader(response?.headers);
+          const routerSuggestedDelay = this.getRenderRoutingDelay(renderRoutingHeader, retryAfterHeader);
           const responseBodySample = this.safeSampleBody(response?.data);
 
           if (status === 429) {
-            const delay = Math.max(min429Delay, cooldownMs * attempt);
+            const delay = routerSuggestedDelay ?? Math.max(min429Delay, cooldownMs * attempt);
             this.diagLog('warn', '🔥 [API_CLIENT] Warm-up hit Render rate limit (429). Waiting for Render cold start window to expire', {
               attempt,
               delay_ms: delay,
               warmup_run_id: warmupRunId,
               attempt_duration_ms: attemptDuration,
-              retry_after_header: retryAfter || null,
-              response_body_sample: responseBodySample
+              retry_after_header: retryAfterHeader || null,
+              response_body_sample: responseBodySample,
+              render_routing: renderRoutingHeader
             });
             await this.sleep(delay);
             continue;
@@ -333,7 +343,8 @@ class ApiClient {
               warmup_run_id: warmupRunId,
               attempt,
               attempt_duration_ms: attemptDuration,
-              response_body_sample: responseBodySample
+              response_body_sample: responseBodySample,
+              render_routing: renderRoutingHeader
             };
             this.diagLog('error', '🔥 [API_CLIENT] Warm-up received unhealthy upstream response', errorPayload);
             throw new Error(`Warm-up failed with upstream status ${status}.`);
@@ -348,6 +359,7 @@ class ApiClient {
             attempt_duration_ms: attemptDuration,
             warmups_inflight: this.activeWarmups - 1
           });
+
           return {
             warmupRunId,
             warmupTriggered: true,
@@ -362,8 +374,11 @@ class ApiClient {
         this.diagLog('error', '🔥 [API_CLIENT] Blockchain API warm-up failed', {
           error_message: error.message,
           error_status: error.response?.status,
-          warmup_run_id: warmupRunId
+          warmup_run_id: warmupRunId,
+          render_routing: error.response?.headers ? this.getRenderRoutingHeader(error.response.headers) : null,
+          retry_after_header: error.response?.headers ? this.getRetryAfterHeader(error.response.headers) : null
         });
+
         const warmupError = new AppError(
           'The blockchain API is waking up but did not respond in time. Please retry in a minute.',
           503,
@@ -373,7 +388,9 @@ class ApiClient {
         warmupError.details = {
           warmupRunId,
           warmupMode: this.warmupMode,
-          attempts: maxAttempts
+          attempts: maxAttempts,
+          renderRouting: error.response?.headers ? this.getRenderRoutingHeader(error.response.headers) : null,
+          retryAfter: error.response?.headers ? this.getRetryAfterHeader(error.response.headers) : null
         };
         throw warmupError;
       } finally {
@@ -399,7 +416,7 @@ class ApiClient {
       service: 'bundler-orchestrator'
     };
 
-    if (logger[level]) {
+    if (typeof logger[level] === 'function') {
       logger[level](message, payload);
     } else {
       logger.info(message, payload);
@@ -420,6 +437,57 @@ class ApiClient {
     } catch (error) {
       return '[unserializable response body]';
     }
+  }
+
+  getRetryAfterHeader(headers = {}) {
+    if (!headers) {
+      return null;
+    }
+
+    return headers['retry-after'] || headers['Retry-After'] || null;
+  }
+
+  getRenderRoutingHeader(headers = {}) {
+    if (!headers) {
+      return null;
+    }
+
+    return headers['x-render-routing'] || headers['X-Render-Routing'] || null;
+  }
+
+  getRenderRoutingDelay(renderRoutingHeader, retryAfterHeader) {
+    if (retryAfterHeader) {
+      const parsedSeconds = Number(retryAfterHeader);
+      if (Number.isFinite(parsedSeconds) && parsedSeconds >= 0) {
+        return parsedSeconds * 1000;
+      }
+
+      const parsedDate = Date.parse(retryAfterHeader);
+      if (!Number.isNaN(parsedDate)) {
+        const diff = parsedDate - Date.now();
+        if (diff > 0) {
+          return diff;
+        }
+      }
+    }
+
+    if (!renderRoutingHeader) {
+      return null;
+    }
+
+    const headerValue = renderRoutingHeader.toLowerCase();
+    const defaultRateLimitDelay = Number(process.env.EXTERNAL_API_RENDER_ROUTER_DELAY_MS || 90000);
+    const defaultHibernateDelay = Number(process.env.EXTERNAL_API_RENDER_HIBERNATE_DELAY_MS || 60000);
+
+    if (headerValue.includes('rate-limited')) {
+      return defaultRateLimitDelay;
+    }
+
+    if (headerValue.includes('dynamic-hibernate')) {
+      return defaultHibernateDelay;
+    }
+
+    return null;
   }
 
   parseDelays(envValue, fallback) {
