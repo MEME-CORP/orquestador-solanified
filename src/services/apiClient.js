@@ -151,7 +151,7 @@ class ApiClient {
 
           originalRequest.__routerWarmAttempted = true;
 
-          if (routerSuggestedDelay) {
+          if (routerSuggestedDelay > 0) {
             this.diagLog('info', '🔥 [API_CLIENT] Honoring router suggested delay before warm-up', {
               delay_ms: routerSuggestedDelay,
               render_routing: renderRoutingHeader,
@@ -382,7 +382,9 @@ class ApiClient {
             maxAttempts,
             timeout_ms: timeoutMs,
             warmup_run_id: warmupRunId,
-            warmups_inflight: this.activeWarmups
+            warmups_inflight: this.activeWarmups,
+            method: 'GET',
+            url: this.healthCheckPath
           });
 
           const response = await this.warmupClient.request({
@@ -565,14 +567,18 @@ class ApiClient {
     }
 
     const headerValue = renderRoutingHeader.toLowerCase();
-    const defaultRateLimitDelay = Number(process.env.EXTERNAL_API_RENDER_ROUTER_DELAY_MS || 90000);
     const defaultHibernateDelay = Number(process.env.EXTERNAL_API_RENDER_HIBERNATE_DELAY_MS || 60000);
 
-    if (headerValue.includes('rate-limited')) {
-      return defaultRateLimitDelay;
+    if (headerValue.includes('dynamic-hibernate')) {
+      return defaultHibernateDelay;
     }
 
-    if (headerValue.includes('dynamic-hibernate')) {
+    if (headerValue.includes('rate-limited')) {
+      // Render's router emits 429 rate-limited while the service wakes. A follow-up GET should be fired immediately.
+      return 0;
+    }
+
+    if (headerValue.includes('hibernate')) {
       return defaultHibernateDelay;
     }
 
