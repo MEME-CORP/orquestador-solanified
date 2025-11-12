@@ -1,4 +1,6 @@
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const { randomUUID } = require('crypto');
 const logger = require('../utils/logger');
 const { AppError } = require('../middleware/errorHandler');
@@ -17,25 +19,39 @@ class ApiClient {
       [45000, 60000, 90000, 120000, 150000]
     );
     this.rateLimitWarmupOnRetry = process.env.EXTERNAL_API_RATE_LIMIT_WARMUP !== 'false';
+    this.userAgent = process.env.EXTERNAL_API_USER_AGENT || 'curl/8.5.0';
 
     const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
+    const apiKey = process.env.EXTERNAL_API_KEY ? String(process.env.EXTERNAL_API_KEY).trim() : '';
     const defaultHeaders = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.EXTERNAL_API_KEY || ''}`
+      'Accept': '*/*',
+      'User-Agent': this.userAgent
     };
+
+    if (apiKey) {
+      defaultHeaders.Authorization = `Bearer ${apiKey}`;
+    }
 
     this.client = axios.create({
       baseURL,
       timeout: 120000, // 2 minutes for blockchain operations (increased from 30s)
-      headers: defaultHeaders
+      headers: defaultHeaders,
+      httpAgent: new http.Agent({ keepAlive: false }),
+      httpsAgent: new https.Agent({ keepAlive: false })
     });
 
     // Dedicated warm-up client without interceptors or automatic retries
     this.warmupClient = axios.create({
       baseURL,
       timeout: 120000,
-      headers: defaultHeaders,
-      validateStatus: () => true
+      headers: {
+        ...defaultHeaders,
+        'Content-Type': 'application/json'
+      },
+      validateStatus: () => true,
+      httpAgent: new http.Agent({ keepAlive: false }),
+      httpsAgent: new https.Agent({ keepAlive: false })
     });
 
     // Request interceptor for logging and idempotency
@@ -43,7 +59,7 @@ class ApiClient {
       async (config) => {
         if (!config.__skipWarmup) {
           if (this.warmupMode !== 'active') {
-            this.diagLog('info', '🔥 [API_CLIENT] Warm-up skipped due to mode', {
+            this.diagLog('info', ' [API_CLIENT] Warm-up skipped due to mode', {
               url: config.url,
               method: config.method?.toUpperCase(),
               warmup_mode: this.warmupMode
