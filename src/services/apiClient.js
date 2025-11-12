@@ -10,6 +10,8 @@ class ApiClient {
     this.WARMUP_TTL_MS = 5 * 60 * 1000; // cache warm state for 5 minutes
     this.activeWarmups = 0;
     this.DIAGNOSTICS_ENABLED = process.env.EXTERNAL_API_WARMUP_DIAGNOSTICS === 'true';
+    this.warmupMode = (process.env.EXTERNAL_API_WARMUP_MODE || 'active').toLowerCase();
+    this.lastWarmupRunId = null;
 
     const baseURL = process.env.EXTERNAL_API_BASE_URL || 'https://rawapisolana-render.onrender.com';
     const defaultHeaders = {
@@ -35,6 +37,14 @@ class ApiClient {
     this.client.interceptors.request.use(
       async (config) => {
         if (!config.__skipWarmup) {
+          if (this.warmupMode !== 'active') {
+            this.diagLog('info', '🔥 [API_CLIENT] Warm-up skipped due to mode', {
+              url: config.url,
+              method: config.method?.toUpperCase(),
+              warmup_mode: this.warmupMode
+            });
+          }
+
           const warmStateAge = this.lastWarmupTimestamp ? Date.now() - this.lastWarmupTimestamp : null;
           this.diagLog('info', '🔥 [API_CLIENT] Warm-up check prior to outbound request', {
             url: config.url,
@@ -44,7 +54,10 @@ class ApiClient {
             request_has_idempotency_key: Boolean(config.idempotencyKey)
           });
 
-          await this.ensureExternalApiReady();
+          const warmupContext = await this.ensureExternalApiReady();
+          if (warmupContext?.warmupRunId) {
+            config.__warmupRunId = warmupContext.warmupRunId;
+          }
         } else {
           delete config.__skipWarmup; // internal requests bypass warm-up checks
         }
@@ -58,7 +71,8 @@ class ApiClient {
         logger.info('API Request:', {
           method: config.method?.toUpperCase(),
           url: config.url,
-          data: config.data ? 'present' : 'none'
+          data: config.data ? 'present' : 'none',
+          warmup_run_id: config.__warmupRunId || null
         });
 
         return config;
@@ -75,7 +89,8 @@ class ApiClient {
         logger.info('API Response:', {
           status: response.status,
           url: response.config.url,
-          method: response.config.method?.toUpperCase()
+          method: response.config.method?.toUpperCase(),
+          warmup_run_id: response.config.__warmupRunId || null
         });
         return response;
       },
@@ -86,7 +101,8 @@ class ApiClient {
           status: error.response?.status,
           url: originalRequest.url,
           method: originalRequest.method?.toUpperCase(),
-          message: error.response?.data?.error?.message || error.message
+          message: error.response?.data?.error?.message || error.message,
+          warmup_run_id: originalRequest.__warmupRunId || null
         });
 
         if (this.shouldRetry(error)) {
@@ -191,10 +207,26 @@ class ApiClient {
   }
 
   async ensureExternalApiReady(force = false) {
+    if (this.warmupMode !== 'active') {
+      return {
+        warmupSkipped: true,
+        warmupMode: this.warmupMode,
+        warmupRunId: this.lastWarmupRunId
+      };
+    }
+
     const now = Date.now();
 
     if (!force && this.lastWarmupTimestamp && now - this.lastWarmupTimestamp < this.WARMUP_TTL_MS) {
-      return;
+      this.diagLog('info', '🔥 [API_CLIENT] Warm-up skipped - cached warm state still valid', {
+        warm_state_age_ms: now - this.lastWarmupTimestamp,
+        warmup_run_id: this.lastWarmupRunId,
+        ttl_ms: this.WARMUP_TTL_MS
+      });
+      return {
+        warmupCached: true,
+        warmupRunId: this.lastWarmupRunId
+      };
     }
 
     if (this.warmupPromise) {
@@ -236,6 +268,7 @@ class ApiClient {
           const status = response?.status ?? 0;
           const attemptDuration = Date.now() - attemptStartedAt;
           const retryAfter = response?.headers?.['retry-after'] || response?.headers?.['Retry-After'];
+          const responseBodySample = this.safeSampleBody(response?.data);
 
           if (status === 429) {
             const delay = Math.max(min429Delay, cooldownMs * attempt);
@@ -244,7 +277,8 @@ class ApiClient {
               delay_ms: delay,
               warmup_run_id: warmupRunId,
               attempt_duration_ms: attemptDuration,
-              retry_after_header: retryAfter || null
+              retry_after_header: retryAfter || null,
+              response_body_sample: responseBodySample
             });
             await this.sleep(delay);
             continue;
@@ -256,13 +290,14 @@ class ApiClient {
               warmup_run_id: warmupRunId,
               attempt,
               attempt_duration_ms: attemptDuration,
-              response_body_sample: this.safeSampleBody(response?.data)
+              response_body_sample: responseBodySample
             };
             this.diagLog('error', '🔥 [API_CLIENT] Warm-up received unhealthy upstream response', errorPayload);
             throw new Error(`Warm-up failed with upstream status ${status}.`);
           }
 
           this.lastWarmupTimestamp = Date.now();
+          this.lastWarmupRunId = warmupRunId;
           this.diagLog('info', '🔥 [API_CLIENT] Blockchain API warm-up succeeded', {
             status,
             warmup_run_id: warmupRunId,
@@ -270,22 +305,34 @@ class ApiClient {
             attempt_duration_ms: attemptDuration,
             warmups_inflight: this.activeWarmups - 1
           });
-          return;
+          return {
+            warmupRunId,
+            warmupTriggered: true,
+            status
+          };
         }
 
         throw new Error('Warm-up attempts exhausted without a healthy response.');
       } catch (error) {
         this.lastWarmupTimestamp = 0;
+        this.lastWarmupRunId = warmupRunId;
         this.diagLog('error', '🔥 [API_CLIENT] Blockchain API warm-up failed', {
           error_message: error.message,
           error_status: error.response?.status,
           warmup_run_id: warmupRunId
         });
-        throw new AppError(
+        const warmupError = new AppError(
           'The blockchain API is waking up but did not respond in time. Please retry in a minute.',
           503,
           'BLOCKCHAIN_API_WARMING_UP'
         );
+        warmupError.warmupRunId = warmupRunId;
+        warmupError.details = {
+          warmupRunId,
+          warmupMode: this.warmupMode,
+          attempts: maxAttempts
+        };
+        throw warmupError;
       } finally {
         this.warmupPromise = null;
         this.activeWarmups = Math.max(0, this.activeWarmups - 1);
