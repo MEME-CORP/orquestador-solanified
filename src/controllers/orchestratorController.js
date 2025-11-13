@@ -16,6 +16,14 @@ const bundlerModel = require('../models/bundlerModel');
 const walletModel = require('../models/walletModel');
 const tokenModel = require('../models/tokenModel');
 
+const getDistributorWallet = (user = {}) => ({
+  publicKey: user?.distributor_public_key || user?.in_app_public_key || null,
+  privateKey: user?.distributor_private_key || user?.in_app_private_key || null
+});
+
+const getDistributorBalanceSol = (user = {}) =>
+  Number(user?.distributor_balance_sol ?? user?.balance_sol ?? 0);
+
 class OrchestratorController {
   /**
    * Create in-app wallet for user
@@ -1929,12 +1937,16 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
-      if (!user.in_app_public_key || !user.in_app_private_key) {
+      const { publicKey: distributorPublicKey, privateKey: distributorPrivateKey } = getDistributorWallet(user);
+
+      if (!distributorPublicKey || !distributorPrivateKey) {
         logger.error('❌ [SELL_SPL_FROM_WALLET] User does not have in-app wallet', {
           requestId,
           user_wallet_id,
-          has_public_key: !!user.in_app_public_key,
-          has_private_key: !!user.in_app_private_key
+          has_distributor_public_key: Boolean(user.distributor_public_key),
+          has_distributor_private_key: Boolean(user.distributor_private_key),
+          has_legacy_in_app_public_key: Boolean(user.in_app_public_key),
+          has_legacy_in_app_private_key: Boolean(user.in_app_private_key)
         });
         throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
       }
@@ -1942,7 +1954,7 @@ class OrchestratorController {
       logger.info('✅ [SELL_SPL_FROM_WALLET] User data retrieved', {
         requestId,
         user_wallet_id,
-        in_app_public_key: user.in_app_public_key,
+        distributor_public_key: distributorPublicKey,
         current_spl_balance: user.balance_spl
       });
 
@@ -1950,14 +1962,14 @@ class OrchestratorController {
       logger.info('🔗 [SELL_SPL_FROM_WALLET] Getting current SPL balance from blockchain', {
         requestId,
         user_wallet_id,
-        in_app_public_key: user.in_app_public_key,
+        in_app_public_key: distributorPublicKey,
         token_contract_address
       });
 
       const balanceCheckStart = Date.now();
       const splBalanceData = await walletService.getSplBalance(
         token_contract_address, 
-        user.in_app_public_key,
+        distributorPublicKey,
         { maxRetries: 3, logProgress: true }
       );
       const balanceCheckTime = Date.now() - balanceCheckStart;
@@ -2015,7 +2027,7 @@ class OrchestratorController {
       logger.info('🔗 [SELL_SPL_FROM_WALLET] Executing sell operation via Pump.fun', {
         requestId,
         user_wallet_id,
-        in_app_public_key: user.in_app_public_key,
+        in_app_public_key: distributorPublicKey,
         token_contract_address,
         sell_percent_string: `${sell_percent}%`,
         expected_sell_amount: sellAmount
@@ -2023,11 +2035,11 @@ class OrchestratorController {
 
       const sellOperationStart = Date.now();
       const sellData = {
-        sellerPublicKey: user.in_app_public_key,
+        sellerPublicKey: distributorPublicKey,
         mintAddress: token_contract_address,
         tokenAmount: `${sell_percent}%`, // API accepts percentage format
         slippageBps: 100, // 1% slippage for sells
-        privateKey: user.in_app_private_key,
+        privateKey: distributorPrivateKey,
         commitment: 'confirmed'
       };
 
@@ -2079,7 +2091,7 @@ class OrchestratorController {
           // Try blockchain API fallback first
           const actualSplBalance = await walletService.getSplBalance(
             token_contract_address, 
-            user.in_app_public_key,
+            distributorPublicKey,
             { maxRetries: 2, logProgress: true }
           );
           
@@ -2136,8 +2148,8 @@ class OrchestratorController {
           balances.solBalance,
           finalSplBalance
         );
-        
-        logger.info('✅ [SELL_SPL_FROM_WALLET] User balances updated in database', {
+
+        logger.info('✅ [SELL_SPL_FROM_WALLET] Updated SOL and SPL balances', {
           requestId,
           user_wallet_id,
           new_sol_balance: balances.solBalance,
@@ -2145,9 +2157,8 @@ class OrchestratorController {
           signature: sellResult.signature
         });
       } else {
-        // Update only SOL balance, preserve existing SPL balance
         await userModel.updateSolBalance(user_wallet_id, balances.solBalance);
-        
+
         logger.info('✅ [SELL_SPL_FROM_WALLET] Updated SOL balance only, preserved existing SPL balance', {
           requestId,
           user_wallet_id,
@@ -2256,7 +2267,8 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
-      if (!user.in_app_public_key) {
+      const { publicKey: distributorPublicKey } = getDistributorWallet(user);
+      if (!distributorPublicKey) {
         throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
       }
 
@@ -2280,7 +2292,7 @@ class OrchestratorController {
       const balanceCheckStart = Date.now();
       const actualSplBalance = await walletService.getSplBalance(
         contractAddress,
-        user.in_app_public_key,
+        distributorPublicKey,
         { maxRetries: 5, logProgress: true }
       );
       const balanceCheckTime = Date.now() - balanceCheckStart;
@@ -2377,32 +2389,43 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
-      if (!user.in_app_public_key) {
+      const { publicKey: inAppPublicKey } = getDistributorWallet(user);
+      if (!inAppPublicKey) {
+        logger.warn('Verify balance called for user without distributor wallet', {
+          user_wallet_id,
+          user_has_distributor_public_key: Boolean(user.distributor_public_key),
+          user_has_legacy_in_app_public_key: Boolean(user.in_app_public_key)
+        });
         throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
       }
 
+      const previousBalance = getDistributorBalanceSol(user);
+
       // Get current balance from blockchain API
       logger.info('Fetching balance from blockchain API', { 
-        in_app_public_key: user.in_app_public_key 
+        in_app_public_key: inAppPublicKey, 
+        user_wallet_id 
       });
 
-      const balanceData = await walletService.getSolBalance(user.in_app_public_key);
-      const currentBalance = balanceData.balanceSol;
+      const balanceData = await walletService.getSolBalance(inAppPublicKey);
+      const currentBalance = Number(
+        balanceData?.balanceSol ?? balanceData?.balance_sol ?? 0
+      );
 
       // Update balance in database
       await userModel.updateSolBalance(user_wallet_id, currentBalance);
 
       logger.info('In-app SOL balance verified and updated', {
         user_wallet_id,
-        previous_balance: user.balance_sol,
+        previous_balance: previousBalance,
         current_balance: currentBalance,
-        in_app_public_key: user.in_app_public_key
+        in_app_public_key: inAppPublicKey
       });
 
       res.json({
         user_wallet_id,
-        in_app_public_key: user.in_app_public_key,
-        previous_balance_sol: user.balance_sol,
+        distributor_public_key: inAppPublicKey,
+        previous_balance_sol: previousBalance.toString(),
         current_balance_sol: currentBalance.toString(),
         balance_updated: true
       });
@@ -2427,9 +2450,15 @@ class OrchestratorController {
         throw new AppError('User not found', 404, 'USER_NOT_FOUND');
       }
 
+      const { publicKey: distributorPublicKey, privateKey: distributorPrivateKey } = getDistributorWallet(user);
+
+      if (!distributorPublicKey || !distributorPrivateKey) {
+        throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
+      }
+
       // Get current in-app wallet balance
-      const balanceData = await walletService.getSolBalance(user.in_app_public_key);
-      const currentBalance = balanceData.balanceSol;
+      const balanceData = await walletService.getSolBalance(distributorPublicKey);
+      const currentBalance = Number(balanceData?.balanceSol ?? balanceData?.balance_sol ?? 0);
 
       // Validate sufficient balance
       const transferAmount = parseFloat(amount_sol);
@@ -2445,27 +2474,28 @@ class OrchestratorController {
       logger.info('Executing transfer to owner wallet');
       
       const transferResult = await solService.transfer({
-        fromPublicKey: user.in_app_public_key,
+        fromPublicKey: distributorPublicKey,
         toPublicKey: user_wallet_id,
         amountSol: transferAmount,
-        privateKey: user.in_app_private_key,
+        privateKey: distributorPrivateKey,
         commitment: 'confirmed'
       }, `transfer-to-owner-${user_wallet_id}-${Date.now()}`);
 
       // Update user balance
-      const newBalance = await walletService.getSolBalance(user.in_app_public_key);
-      await userModel.updateSolBalance(user_wallet_id, newBalance.balanceSol);
+      const newBalance = await walletService.getSolBalance(distributorPublicKey);
+      const newBalanceSol = Number(newBalance?.balanceSol ?? newBalance?.balance_sol ?? 0);
+      await userModel.updateSolBalance(user_wallet_id, newBalanceSol);
 
       logger.info('Transfer to owner wallet completed', {
         user_wallet_id,
         amount_sol: transferAmount,
         txid: transferResult.signature,
-        new_balance: newBalance.balanceSol
+        new_balance: newBalanceSol
       });
 
       res.json({
         txid: transferResult.signature,
-        new_balance_sol: newBalance.balanceSol.toString()
+        new_balance_sol: newBalanceSol.toString()
       });
     } catch (error) {
       next(error);
