@@ -1,3 +1,4 @@
+const rawApiClient = require('./rawApiClient');
 const apiClient = require('./apiClient');
 const logger = require('../utils/logger');
 const { AppError } = require('../middleware/errorHandler');
@@ -19,32 +20,32 @@ class WalletService {
         endpoint: '/api/v1/wallet/create'
       });
 
-      const response = await apiClient.post('/api/v1/wallet/create', { count });
+      const responseData = await rawApiClient.createWalletInRawApi({ count });
       const requestTime = Date.now() - requestStart;
 
       logger.info('✅ [WALLET_SERVICE] Blockchain API response received', {
         count,
         request_time_ms: requestTime,
-        response_ok: response.ok,
-        data_length: response.data ? response.data.length : 0
+        response_ok: responseData?.ok,
+        data_length: Array.isArray(responseData?.data) ? responseData.data.length : 0
       });
 
-      if (!ApiResponseValidator.validateWalletCreateResponse(response)) {
+      if (!ApiResponseValidator.validateWalletCreateResponse(responseData)) {
         logger.error('❌ [WALLET_SERVICE] Invalid response format from blockchain API', {
           count,
           request_time_ms: requestTime,
           response_structure: {
-            has_ok: 'ok' in response,
-            has_data: 'data' in response,
-            data_is_array: Array.isArray(response.data),
-            data_length: response.data ? response.data.length : 0
+            has_ok: responseData ? 'ok' in responseData : false,
+            has_data: responseData ? 'data' in responseData : false,
+            data_is_array: Array.isArray(responseData?.data),
+            data_length: Array.isArray(responseData?.data) ? responseData.data.length : 0
           }
         });
         throw new AppError('Invalid wallet creation response format', 502, 'WALLET_CREATION_INVALID_RESPONSE');
       }
 
       // Log wallet creation details (without exposing private keys)
-      const wallets = response.data.map((wallet, index) => ({
+      const wallets = responseData.data.map((wallet, index) => ({
         index,
         has_public_key: !!wallet.publicKey,
         has_private_key: !!wallet.privateKey,
@@ -59,7 +60,7 @@ class WalletService {
         wallet_details: wallets
       });
 
-      return response.data;
+      return responseData.data;
     } catch (error) {
       const requestTime = Date.now() - requestStart;
       

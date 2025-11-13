@@ -11,6 +11,9 @@ const orchestratorRoutes = require('./routes/orchestrator');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render terminates TLS/proxy upstream, so enable trust proxy to read X-Forwarded-* safely
+app.set('trust proxy', 1);
+
 const rawAllowedOrigins = process.env.ALLOWED_ORIGINS || '';
 const allowedOrigins = rawAllowedOrigins
   .split(',')
@@ -51,12 +54,18 @@ app.use(helmet());
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// Rate limiting
+// Rate limiting (defaults can be overridden via environment)
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 100);
+
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 10000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: 'Too many requests from this IP, please try again later.'
 });
+
 app.use(limiter);
 
 // Body parsing middleware
