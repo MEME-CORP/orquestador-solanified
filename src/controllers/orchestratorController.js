@@ -25,6 +25,75 @@ const getDistributorBalanceSol = (user = {}) =>
   Number(user?.distributor_balance_sol ?? user?.balance_sol ?? 0);
 
 class OrchestratorController {
+  static sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  static getRandomDelay(minMs, maxMs) {
+    return minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  }
+
+  static async waitForChildBalanceConfirmation(publicKey, expectedBalance, options = {}) {
+    const {
+      requestId,
+      maxAttempts = 5,
+      baseDelayMs = 2000,
+      tolerance = 0.00005
+    } = options;
+
+    let lastResult = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        lastResult = await walletService.getSolBalance(publicKey, {
+          maxRetries: 1,
+          logProgress: attempt === 1
+        });
+
+        if (lastResult.balanceSol >= expectedBalance - tolerance) {
+          if (attempt > 1) {
+            logger.info('Child wallet balance confirmed after retries', {
+              publicKey,
+              requestId,
+              attempt,
+              balance: lastResult.balanceSol,
+              expectedBalance
+            });
+          }
+          return lastResult;
+        }
+      } catch (error) {
+        logger.warn('Child wallet balance poll failed', {
+          publicKey,
+          requestId,
+          attempt,
+          error: error.message
+        });
+      }
+
+      if (attempt < maxAttempts) {
+        const delay = baseDelayMs * attempt + Math.floor(Math.random() * 500);
+        logger.info('Waiting for child balance confirmation retry', {
+          publicKey,
+          requestId,
+          attempt,
+          nextDelayMs: delay,
+          expectedBalance
+        });
+        await OrchestratorController.sleep(delay);
+      }
+    }
+
+    logger.warn('Child wallet balance confirmation timed out, using last known value', {
+      publicKey,
+      requestId,
+      expectedBalance,
+      lastKnownBalance: lastResult?.balanceSol
+    });
+
+    return lastResult;
+  }
+
   /**
    * Create in-app wallet for user
    * POST /api/orchestrator/create-wallet-in-app
@@ -378,8 +447,43 @@ class OrchestratorController {
         };
       });
 
-      const fundingResults = await solService.batchTransfer(fundingTransfers, `${requestId}-funding`);
-      
+      let fundingSuccessful = 0;
+      let fundingFailed = 0;
+      const fundingErrors = [];
+
+      for (let i = 0; i < fundingTransfers.length; i++) {
+        const transferPayload = fundingTransfers[i];
+
+        if (i > 0) {
+          const delayMs = OrchestratorController.getRandomDelay(60000, 120000);
+          logger.info(`Temporization: waiting ${delayMs}ms before next mother wallet funding`, {
+            requestId,
+            motherWalletOrder: i + 1
+          });
+          await OrchestratorController.sleep(delayMs);
+        }
+
+        try {
+          await solService.transfer(transferPayload, `${requestId}-funding-${i}`);
+          fundingSuccessful += 1;
+        } catch (error) {
+          fundingFailed += 1;
+          fundingErrors.push({ index: i, error: error.message, toPublicKey: transferPayload.toPublicKey });
+          logger.error('Mother wallet funding transfer failed', {
+            requestId,
+            index: i,
+            toPublicKey: transferPayload.toPublicKey,
+            error: error.message
+          });
+        }
+      }
+
+      const fundingResults = {
+        successful: fundingSuccessful,
+        failed: fundingFailed,
+        errors: fundingErrors
+      };
+
       if (fundingResults.failed > 0) {
         logger.error('Some mother wallet funding failed', { 
           successful: fundingResults.successful,
@@ -390,7 +494,7 @@ class OrchestratorController {
 
       // Update user balance (with rate limiting)
       logger.info(`Rate limiting: waiting 300ms before user balance check`);
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await OrchestratorController.sleep(300);
       
       try {
         const newUserBalance = await walletService.getSolBalance(user.distributor_public_key);
@@ -413,7 +517,7 @@ class OrchestratorController {
         // Add delay between mother wallet balance checks
         if (i > 0) {
           logger.info(`Rate limiting: waiting 300ms before next mother wallet balance check`);
-          await new Promise(resolve => setTimeout(resolve, 300));
+          await OrchestratorController.sleep(300);
         }
         
         try {
@@ -434,7 +538,8 @@ class OrchestratorController {
       // Global sequentialization: ensure only one child funding happens at a time across all mothers
       let isFirstChildTransfer = true;
       
-      for (const motherWallet of bundlerData.allocated_mother_wallets) {
+      for (let motherIndex = 0; motherIndex < bundlerData.allocated_mother_wallets.length; motherIndex++) {
+        const motherWallet = bundlerData.allocated_mother_wallets[motherIndex];
         try {
           const childWallets = await walletModel.getChildWalletsByMother(motherWallet.id);
           
@@ -442,6 +547,10 @@ class OrchestratorController {
             logger.warn('No child wallets found for mother wallet', { motherWalletId: motherWallet.id });
             continue;
           }
+
+          const initialChildBalances = new Map(
+            childWallets.map(child => [child.public_key, parseFloat(child.balance_sol) || 0])
+          );
 
           // Determine distribution per mother
           // If there is exactly one child wallet, use the precomputed per-mother child amount (0.2–0.3 SOL)
@@ -463,12 +572,12 @@ class OrchestratorController {
             try {
               // Randomized delay between 1 and 2 minutes before this child transfer (skip before very first overall)
               if (!isFirstChildTransfer) {
-                const delayMs = 60000 + Math.floor(Math.random() * 60000);
+                const delayMs = OrchestratorController.getRandomDelay(60000, 120000);
                 logger.info(`Temporization: waiting ${delayMs}ms before next child transfer`, {
                   motherWalletId: motherWallet.id,
                   nextChildIndex: i
                 });
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+                await OrchestratorController.sleep(delayMs);
               }
               isFirstChildTransfer = false;
 
@@ -492,13 +601,22 @@ class OrchestratorController {
               // Small delay before balance check to respect API rate limits
               if (i > 0) {
                 logger.info(`Rate limiting: waiting 300ms before balance check`);
-                await new Promise(resolve => setTimeout(resolve, 300));
+                await OrchestratorController.sleep(300);
               }
 
               // Update child wallet balance from blockchain
               try {
-                const childBalance = await walletService.getSolBalance(child.public_key);
-                await walletModel.updateChildWalletSolBalance(child.public_key, childBalance.balanceSol);
+                const baseline = initialChildBalances.get(child.public_key) || 0;
+                const expectedBalance = baseline + amount;
+                const childBalance = await OrchestratorController.waitForChildBalanceConfirmation(
+                  child.public_key,
+                  expectedBalance,
+                  { requestId }
+                );
+
+                const finalChildBalance = childBalance?.balanceSol ?? Math.max(expectedBalance - 0.00001, 0);
+
+                await walletModel.updateChildWalletSolBalance(child.public_key, finalChildBalance);
               } catch (balanceError) {
                 logger.error('Failed to update child wallet balance after transfer', {
                   publicKey: child.public_key,
@@ -520,7 +638,7 @@ class OrchestratorController {
 
           // Update mother wallet balance after distributions (with rate limiting)
           logger.info(`Rate limiting: waiting 300ms before mother wallet balance check`);
-          await new Promise(resolve => setTimeout(resolve, 300)); // Additional delay for mother wallet
+          await OrchestratorController.sleep(300); // Additional delay for mother wallet
           
           try {
             const updatedMotherBalance = await walletService.getSolBalance(motherWallet.public_key);
@@ -532,6 +650,35 @@ class OrchestratorController {
               error: balanceError.message
             });
             // Continue with bundler creation even if mother wallet balance update fails
+          }
+
+          try {
+            const persistedChildren = await walletModel.getChildWalletsByMother(motherWallet.id);
+            const aggregatedChildSol = persistedChildren.reduce((sum, child) => sum + (parseFloat(child.balance_sol) || 0), 0);
+            const aggregatedChildSpl = persistedChildren.reduce((sum, child) => sum + (parseFloat(child.balance_spl) || 0), 0);
+
+            await bundlerModel.updateAssignedMotherChildBalances(
+              bundlerData.bundler_id,
+              motherWallet.id,
+              Number(aggregatedChildSol.toFixed(9)),
+              Number(aggregatedChildSpl.toFixed(9))
+            );
+          } catch (aggregationError) {
+            logger.error('Failed to persist aggregated child balances for mother wallet', {
+              bundlerId: bundlerData.bundler_id,
+              motherWalletId: motherWallet.id,
+              error: aggregationError.message
+            });
+          }
+
+          if (motherIndex < bundlerData.allocated_mother_wallets.length - 1) {
+            const delayMs = OrchestratorController.getRandomDelay(60000, 120000);
+            logger.info(`Temporization: waiting ${delayMs}ms before next mother wallet distribution`, {
+              requestId,
+              currentMotherWalletId: motherWallet.id,
+              nextMotherIndex: motherIndex + 1
+            });
+            await OrchestratorController.sleep(delayMs);
           }
 
         } catch (error) {

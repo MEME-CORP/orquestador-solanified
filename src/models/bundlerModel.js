@@ -365,6 +365,53 @@ class BundlerModel {
   }
 
   /**
+   * Update aggregated child balances for a specific assigned mother wallet
+   * @param {number} bundlerId - Bundler ID
+   * @param {number} motherWalletId - Mother wallet ID
+   * @param {number} childBalanceSol - Aggregated child SOL balance
+   * @param {number} childBalanceSpl - Aggregated child SPL balance
+   * @returns {Promise<Object>} Updated assignment record
+   */
+  async updateAssignedMotherChildBalances(bundlerId, motherWalletId, childBalanceSol, childBalanceSpl) {
+    try {
+      const { data, error } = await supabase
+        .from('assigned_mother_wallets')
+        .update({
+          child_balance_sol: childBalanceSol,
+          child_balance_spl: childBalanceSpl
+        })
+        .eq('bundler_id', bundlerId)
+        .eq('mother_wallet_id', motherWalletId)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      logger.info('Assigned mother wallet child balances updated', {
+        bundlerId,
+        motherWalletId,
+        childBalanceSol,
+        childBalanceSpl
+      });
+
+      return data;
+    } catch (error) {
+      logger.error('Error updating assigned mother wallet child balances:', {
+        bundlerId,
+        motherWalletId,
+        error: error.message
+      });
+      throw new AppError(
+        'Failed to update assigned mother wallet child balances',
+        500,
+        'ASSIGNED_MOTHER_UPDATE_FAILED'
+      );
+    }
+  }
+
+  /**
    * Get all child wallets for a bundler
    * @param {number} bundlerId - Bundler ID
    * @returns {Promise<Array>} Array of child wallet objects
