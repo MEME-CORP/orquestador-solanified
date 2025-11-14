@@ -2521,6 +2521,106 @@ class OrchestratorController {
   }
 
   /**
+   * Verify developer wallet SOL balance
+   * POST /api/orchestrator/verify-dev-wallet-balance
+   */
+  async verifyDevWalletBalance(req, res, next) {
+    const startTime = Date.now();
+    const requestId = uuidv4();
+
+    try {
+      const { user_wallet_id } = req.body;
+
+      logger.info('🚀 [VERIFY_DEV_WALLET_BALANCE] Request started', {
+        requestId,
+        user_wallet_id,
+        endpoint: 'POST /api/orchestrator/verify-dev-wallet-balance'
+      });
+
+      const user = await userModel.getUserByWalletId(user_wallet_id);
+      if (!user) {
+        throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+      }
+
+      const devPublicKey = user?.dev_public_key;
+      if (!devPublicKey) {
+        logger.warn('⚠️ [VERIFY_DEV_WALLET_BALANCE] Dev wallet not provisioned yet', {
+          requestId,
+          user_wallet_id,
+          has_dev_public_key: Boolean(user?.dev_public_key)
+        });
+        throw new AppError(
+          'Developer wallet not ready yet. Please retry after provisioning completes.',
+          409,
+          'DEV_WALLET_NOT_READY'
+        );
+      }
+
+      const previousBalance = Number(user?.dev_balance_sol ?? 0);
+      const currentSplBalance = Number(user?.dev_balance_spl ?? 0);
+
+      logger.info('🔗 [VERIFY_DEV_WALLET_BALANCE] Fetching on-chain SOL balance for dev wallet', {
+        requestId,
+        user_wallet_id,
+        dev_public_key: devPublicKey
+      });
+
+      const balanceCheckStart = Date.now();
+      const balanceData = await walletService.getSolBalance(devPublicKey, {
+        maxRetries: 3,
+        logProgress: true
+      });
+      const balanceCheckTime = Date.now() - balanceCheckStart;
+
+      const currentBalance = Number(balanceData?.balanceSol ?? balanceData?.balance_sol ?? 0);
+
+      logger.info('✅ [VERIFY_DEV_WALLET_BALANCE] Balance retrieved', {
+        requestId,
+        user_wallet_id,
+        dev_public_key: devPublicKey,
+        previous_balance: previousBalance,
+        current_balance: currentBalance,
+        balance_check_time_ms: balanceCheckTime
+      });
+
+      await userModel.updateDevBalances(user_wallet_id, currentBalance, currentSplBalance);
+
+      const balanceDifference = currentBalance - previousBalance;
+      const balanceUpdated = Math.abs(balanceDifference) > 0.000001;
+      const totalTime = Date.now() - startTime;
+
+      const response = {
+        user_wallet_id,
+        dev_public_key: devPublicKey,
+        previous_balance_sol: previousBalance.toString(),
+        current_balance_sol: currentBalance.toString(),
+        balance_difference_sol: balanceDifference,
+        balance_updated: balanceUpdated,
+        verification_time_ms: totalTime
+      };
+
+      logger.info('🎉 [VERIFY_DEV_WALLET_BALANCE] Request completed successfully', {
+        requestId,
+        user_wallet_id,
+        dev_public_key: devPublicKey,
+        total_time_ms: totalTime,
+        balance_updated: balanceUpdated,
+        response
+      });
+
+      res.json(response);
+    } catch (error) {
+      logger.error('❌ [VERIFY_DEV_WALLET_BALANCE] Request failed', {
+        requestId,
+        user_wallet_id: req.body?.user_wallet_id || 'unknown',
+        error_code: error.code || 'UNKNOWN_ERROR',
+        error_message: error.message
+      });
+      next(error);
+    }
+  }
+
+  /**
    * Verify in-app SOL balance
    * POST /api/orchestrator/verify-in-app-sol-balance
    */
