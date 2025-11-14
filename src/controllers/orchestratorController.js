@@ -2007,12 +2007,16 @@ class OrchestratorController {
     const requestId = uuidv4();
 
     try {
-      const { user_wallet_id, sell_percent } = req.body;
+      const { user_wallet_id, sell_percent, wallet_type } = req.body;
+      const walletType = (wallet_type || 'distributor').toLowerCase() === 'developer'
+        ? 'developer'
+        : 'distributor';
 
       logger.info('🚀 [SELL_SPL_FROM_WALLET] Request started', {
         requestId,
         user_wallet_id,
         sell_percent,
+        wallet_type: walletType,
         timestamp: new Date().toISOString(),
         endpoint: 'POST /api/orchestrator/sell-spl-from-wallet',
         ip: req.ip,
@@ -2086,37 +2090,70 @@ class OrchestratorController {
 
       const { publicKey: distributorPublicKey, privateKey: distributorPrivateKey } = getDistributorWallet(user);
 
-      if (!distributorPublicKey || !distributorPrivateKey) {
-        logger.error('❌ [SELL_SPL_FROM_WALLET] User does not have in-app wallet', {
+      const walletContext = walletType === 'developer'
+        ? {
+            type: 'developer',
+            publicKey: user?.dev_public_key,
+            privateKey: user?.dev_private_key,
+            dbSol: Number(user?.dev_balance_sol ?? 0),
+            dbSpl: Number(user?.dev_balance_spl ?? 0),
+            updateBalances: (sol, spl) => userModel.updateDevBalances(user_wallet_id, sol, spl),
+            updateSolOnly: (sol) => userModel.updateDevBalances(
+              user_wallet_id,
+              sol,
+              Number(user?.dev_balance_spl ?? 0)
+            )
+          }
+        : {
+            type: 'distributor',
+            publicKey: distributorPublicKey,
+            privateKey: distributorPrivateKey,
+            dbSol: getDistributorBalanceSol(user),
+            dbSpl: Number(user?.balance_spl ?? user?.distributor_balance_spl ?? 0),
+            updateBalances: (sol, spl) => userModel.updateBalances(user_wallet_id, sol, spl),
+            updateSolOnly: (sol) => userModel.updateSolBalance(user_wallet_id, sol)
+          };
+
+      if (!walletContext.publicKey || !walletContext.privateKey) {
+        logger.error('❌ [SELL_SPL_FROM_WALLET] Requested wallet type not provisioned', {
           requestId,
           user_wallet_id,
-          has_distributor_public_key: Boolean(user.distributor_public_key),
-          has_distributor_private_key: Boolean(user.distributor_private_key),
-          has_legacy_in_app_public_key: Boolean(user.in_app_public_key),
-          has_legacy_in_app_private_key: Boolean(user.in_app_private_key)
+          wallet_type: walletContext.type,
+          has_public_key: Boolean(walletContext.publicKey),
+          has_private_key: Boolean(walletContext.privateKey)
         });
-        throw new AppError('User does not have an in-app wallet', 400, 'NO_IN_APP_WALLET');
+
+        throw new AppError(
+          walletContext.type === 'developer'
+            ? 'Developer wallet not ready yet. Please retry once provisioning completes.'
+            : 'User does not have an in-app wallet',
+          walletContext.type === 'developer' ? 409 : 400,
+          walletContext.type === 'developer' ? 'DEV_WALLET_NOT_READY' : 'NO_IN_APP_WALLET'
+        );
       }
 
-      logger.info('✅ [SELL_SPL_FROM_WALLET] User data retrieved', {
+      logger.info('✅ [SELL_SPL_FROM_WALLET] User wallet resolved', {
         requestId,
         user_wallet_id,
-        distributor_public_key: distributorPublicKey,
-        current_spl_balance: user.balance_spl
+        wallet_type: walletContext.type,
+        wallet_public_key: walletContext.publicKey,
+        stored_sol_balance: walletContext.dbSol,
+        stored_spl_balance: walletContext.dbSpl
       });
 
       // Step 4: Get current SPL token balance from blockchain
       logger.info('🔗 [SELL_SPL_FROM_WALLET] Getting current SPL balance from blockchain', {
         requestId,
         user_wallet_id,
-        in_app_public_key: distributorPublicKey,
+        wallet_type: walletContext.type,
+        wallet_public_key: walletContext.publicKey,
         token_contract_address
       });
 
       const balanceCheckStart = Date.now();
       const splBalanceData = await walletService.getSplBalance(
         token_contract_address, 
-        distributorPublicKey,
+        walletContext.publicKey,
         { maxRetries: 3, logProgress: true }
       );
       const balanceCheckTime = Date.now() - balanceCheckStart;
@@ -2174,7 +2211,8 @@ class OrchestratorController {
       logger.info('🔗 [SELL_SPL_FROM_WALLET] Executing sell operation via Pump.fun', {
         requestId,
         user_wallet_id,
-        in_app_public_key: distributorPublicKey,
+        wallet_type: walletContext.type,
+        wallet_public_key: walletContext.publicKey,
         token_contract_address,
         sell_percent_string: `${sell_percent}%`,
         expected_sell_amount: sellAmount
@@ -2182,11 +2220,11 @@ class OrchestratorController {
 
       const sellOperationStart = Date.now();
       const sellData = {
-        sellerPublicKey: distributorPublicKey,
+        sellerPublicKey: walletContext.publicKey,
         mintAddress: token_contract_address,
         tokenAmount: `${sell_percent}%`, // API accepts percentage format
         slippageBps: 100, // 1% slippage for sells
-        privateKey: distributorPrivateKey,
+        privateKey: walletContext.privateKey,
         commitment: 'confirmed'
       };
 
@@ -2238,7 +2276,7 @@ class OrchestratorController {
           // Try blockchain API fallback first
           const actualSplBalance = await walletService.getSplBalance(
             token_contract_address, 
-            distributorPublicKey,
+            walletContext.publicKey,
             { maxRetries: 2, logProgress: true }
           );
           
@@ -2290,25 +2328,23 @@ class OrchestratorController {
       // Update user balances in database
       const balanceUpdateStart = Date.now();
       if (shouldUpdateSplBalance) {
-        await userModel.updateBalances(
-          user_wallet_id,
-          balances.solBalance,
-          finalSplBalance
-        );
+        await walletContext.updateBalances(balances.solBalance, finalSplBalance);
 
         logger.info('✅ [SELL_SPL_FROM_WALLET] Updated SOL and SPL balances', {
           requestId,
           user_wallet_id,
+          wallet_type: walletContext.type,
           new_sol_balance: balances.solBalance,
           new_spl_balance: finalSplBalance,
           signature: sellResult.signature
         });
       } else {
-        await userModel.updateSolBalance(user_wallet_id, balances.solBalance);
+        await walletContext.updateSolOnly(balances.solBalance);
 
         logger.info('✅ [SELL_SPL_FROM_WALLET] Updated SOL balance only, preserved existing SPL balance', {
           requestId,
           user_wallet_id,
+          wallet_type: walletContext.type,
           new_sol_balance: balances.solBalance,
           signature: sellResult.signature,
           note: 'SPL balance preserved due to API issues'
@@ -2324,12 +2360,15 @@ class OrchestratorController {
         sold_amount_spl: sellAmount,
         remaining_spl_balance: finalSplBalance,
         new_sol_balance: balances.solBalance,
-        token_contract_address: token_contract_address
+        token_contract_address: token_contract_address,
+        wallet_type: walletContext.type,
+        wallet_public_key: walletContext.publicKey
       };
 
       logger.info('🎉 [SELL_SPL_FROM_WALLET] Request completed successfully', {
         requestId,
         user_wallet_id,
+        wallet_type: walletContext.type,
         token_contract_address,
         sell_percent,
         total_time_ms: totalTime,
