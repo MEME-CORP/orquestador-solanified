@@ -165,6 +165,12 @@ const sellSplFromWalletSchema = Joi.object({
       'number.min': 'Sell percentage must be at least 1%',
       'number.max': 'Sell percentage cannot exceed 100%',
       'any.required': 'Sell percentage is required'
+    }),
+  wallet_type: Joi.string()
+    .valid('distributor', 'developer')
+    .default('distributor')
+    .messages({
+      'any.only': 'wallet_type must be either "distributor" or "developer"'
     })
 });
 
