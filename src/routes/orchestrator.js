@@ -75,6 +75,16 @@ router.post(
 );
 
 /**
+ * Verify developer wallet SOL balance
+ * POST /api/orchestrator/verify-dev-wallet-balance
+ */
+router.post(
+  '/verify-dev-wallet-balance',
+  validateRequest(verifyInAppSolBalanceSchema),
+  orchestratorController.verifyDevWalletBalance
+);
+
+/**
  * Verify in-app SOL balance
  * POST /api/orchestrator/verify-in-app-sol-balance
  */
