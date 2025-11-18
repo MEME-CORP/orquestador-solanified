@@ -1975,6 +1975,72 @@ class OrchestratorController {
           }
         }
 
+        // Sweep Dev wallet SOL back to distributor as part of 100% sell cleanup
+        if (user.dev_public_key && user.dev_private_key) {
+          try {
+            const devBalanceData = await walletService.getSolBalance(user.dev_public_key);
+            const devCurrentBalance = Number(devBalanceData?.balanceSol ?? 0);
+            const devTransferable = devCurrentBalance - MINIMUM_RESERVE;
+
+            logger.info('Evaluating Dev wallet sweep after 100% sell', {
+              requestId,
+              dev_public_key: user.dev_public_key,
+              dev_current_balance: devCurrentBalance,
+              minimum_reserve: MINIMUM_RESERVE,
+              transferable_amount: devTransferable
+            });
+
+            if (devTransferable > 0.0001) {
+              const sweepSignature = await solService.transfer({
+                fromPublicKey: user.dev_public_key,
+                toPublicKey: distributorPublicKey,
+                amountSol: devTransferable,
+                privateKey: user.dev_private_key,
+                commitment: 'confirmed'
+              }, `dev-sweep-${bundler.id}-${Date.now()}`);
+
+              logger.info('Dev wallet SOL sweep completed', {
+                requestId,
+                dev_public_key: user.dev_public_key,
+                transfer_amount: devTransferable,
+                signature: sweepSignature.signature,
+                wallet_type: 'developer'
+              });
+
+              const [updatedDevBalance, updatedDistributorBalance] = await Promise.all([
+                walletService.getSolBalance(user.dev_public_key),
+                walletService.getSolBalance(distributorPublicKey)
+              ]);
+
+              await userModel.updateDevBalances(
+                user_wallet_id,
+                Math.max(updatedDevBalance.balanceSol, MINIMUM_RESERVE),
+                Number(user.dev_balance_spl ?? 0)
+              );
+
+              await userModel.updateDistributorBalances(
+                user_wallet_id,
+                updatedDistributorBalance.balanceSol,
+                user.distributor_balance_spl
+              );
+            }
+          } catch (devSweepError) {
+            logger.error('Dev wallet sweep failed during 100% sell cleanup', {
+              requestId,
+              dev_public_key: user.dev_public_key,
+              error: devSweepError.message,
+              wallet_type: 'developer'
+            });
+          }
+        } else {
+          logger.warn('Dev wallet credentials missing during 100% sell cleanup, skipping sweep', {
+            requestId,
+            user_wallet_id,
+            has_dev_public_key: Boolean(user.dev_public_key),
+            has_dev_private_key: Boolean(user.dev_private_key)
+          });
+        }
+
         await bundlerModel.deactivateBundler(bundler.id);
       }
 

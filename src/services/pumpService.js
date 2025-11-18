@@ -161,35 +161,44 @@ class PumpService {
     const results = [];
     const errors = [];
 
-    logger.info('Executing batch buy operations with rate limiting', { count: buyOperations.length });
+    const batchSize = Number(process.env.PUMP_BATCH_SIZE || 10);
+    const batchDelayMs = Number(process.env.PUMP_BATCH_DELAY_MS || 1000);
 
-    for (let i = 0; i < buyOperations.length; i++) {
-      try {
-        const config = idempotencyKey ? { idempotencyKey: `${idempotencyKey}-buy-${i}` } : {};
-        
-        // Add delay between requests to respect rate limits (1 req/s)
-        if (i > 0) {
-          const delay = 1200; // 1.2 seconds to be safe
-          logger.info(`Rate limiting: waiting ${delay}ms before next buy operation`, { operationIndex: i });
-          await this.sleep(delay);
+    logger.info('Executing batch buy operations with parallel dispatch', {
+      totalOperations: buyOperations.length,
+      batchSize,
+      batchDelayMs
+    });
+
+    for (let start = 0; start < buyOperations.length; start += batchSize) {
+      const batch = buyOperations.slice(start, start + batchSize);
+      const batchIndex = Math.floor(start / batchSize) + 1;
+
+      logger.info('Dispatching buy batch', {
+        batchIndex,
+        batchSize: batch.length,
+        globalStartIndex: start
+      });
+
+      const batchPromises = batch.map((operation, offset) =>
+        this.executeBuyOperation(operation, start + offset, idempotencyKey)
+      );
+
+      const batchResults = await Promise.all(batchPromises);
+
+      batchResults.forEach(result => {
+        results.push(result);
+        if (!result.success) {
+          errors.push({ index: result.index, error: result.error });
         }
-        
-        const result = await this.buyWithRetry(buyOperations[i], 3);
-        results.push({ index: i, success: true, data: result });
-        
-        logger.info(`Buy operation ${i + 1}/${buyOperations.length} completed successfully`, {
-          buyer: buyOperations[i].buyerPublicKey,
-          solAmount: buyOperations[i].solAmount
+      });
+
+      if (start + batchSize < buyOperations.length) {
+        logger.info('Waiting between buy batches', {
+          batchIndex,
+          delayMs: batchDelayMs
         });
-        
-      } catch (error) {
-        logger.error(`Batch buy operation ${i} failed after retries:`, {
-          buyer: buyOperations[i].buyerPublicKey,
-          error: error.message,
-          code: error.code
-        });
-        errors.push({ index: i, error: error.message });
-        results.push({ index: i, success: false, error: error.message });
+        await this.sleep(batchDelayMs);
       }
     }
 
@@ -199,6 +208,26 @@ class PumpService {
       failed: errors.length,
       errors
     };
+  }
+
+  async executeBuyOperation(operation, index, idempotencyKey) {
+    try {
+      const result = await this.buyWithRetry(operation, 3);
+      logger.info('Buy operation completed', {
+        index,
+        buyer: operation.buyerPublicKey,
+        solAmount: operation.solAmount
+      });
+      return { index, success: true, data: result };
+    } catch (error) {
+      logger.error('Buy operation failed after retries', {
+        index,
+        buyer: operation.buyerPublicKey,
+        error: error.message,
+        code: error.code
+      });
+      return { index, success: false, error: error.message };
+    }
   }
 
   /**
@@ -324,8 +353,13 @@ class PumpService {
     const results = [];
     const errors = [];
 
-    logger.info('Executing batch sell operations', { 
-      count: sellOperations.length,
+    const batchSize = Number(process.env.PUMP_BATCH_SIZE || 10);
+    const batchDelayMs = Number(process.env.PUMP_BATCH_DELAY_MS || 1000);
+
+    logger.info('Executing batch sell operations with parallel dispatch', {
+      totalOperations: sellOperations.length,
+      batchSize,
+      batchDelayMs,
       walletsToProcess: sellOperations.map((op, index) => ({
         index,
         wallet: op.sellerPublicKey,
@@ -335,35 +369,35 @@ class PumpService {
       }))
     });
 
-    for (let i = 0; i < sellOperations.length; i++) {
-      try {
-        const operation = sellOperations[i];
-        
-        logger.info(`Processing sell operation ${i + 1}/${sellOperations.length}`, {
-          wallet: operation.sellerPublicKey,
-          tokenAmount: operation.tokenAmount,
-          currentBalance: operation._debugInfo?.currentSplBalance || 'unknown',
-          expectedSell: operation._debugInfo?.willSellAmount || 'unknown'
-        });
+    for (let start = 0; start < sellOperations.length; start += batchSize) {
+      const batch = sellOperations.slice(start, start + batchSize);
+      const batchIndex = Math.floor(start / batchSize) + 1;
 
-        const config = idempotencyKey ? { idempotencyKey: `${idempotencyKey}-sell-${i}` } : {};
-        const result = await this.sell(operation);
-        results.push({ index: i, success: true, data: result });
-        
-        logger.info(`Sell operation ${i + 1}/${sellOperations.length} completed successfully`, {
-          wallet: operation.sellerPublicKey,
-          tokenAmount: operation.tokenAmount
+      logger.info('Dispatching sell batch', {
+        batchIndex,
+        batchSize: batch.length,
+        globalStartIndex: start
+      });
+
+      const batchPromises = batch.map((operation, offset) =>
+        this.executeSellOperation(operation, start + offset, idempotencyKey)
+      );
+
+      const batchResults = await Promise.all(batchPromises);
+
+      batchResults.forEach(result => {
+        results.push(result);
+        if (!result.success) {
+          errors.push({ index: result.index, error: result.error });
+        }
+      });
+
+      if (start + batchSize < sellOperations.length) {
+        logger.info('Waiting between sell batches', {
+          batchIndex,
+          delayMs: batchDelayMs
         });
-        
-      } catch (error) {
-        logger.error(`Batch sell operation ${i} failed:`, {
-          wallet: sellOperations[i].sellerPublicKey,
-          tokenAmount: sellOperations[i].tokenAmount,
-          error: error.message,
-          code: error.code
-        });
-        errors.push({ index: i, error: error.message });
-        results.push({ index: i, success: false, error: error.message });
+        await this.sleep(batchDelayMs);
       }
     }
 
@@ -373,6 +407,26 @@ class PumpService {
       failed: errors.length,
       errors
     };
+  }
+
+  async executeSellOperation(operation, index, idempotencyKey) {
+    try {
+      const result = await this.sell(operation);
+      logger.info('Sell operation completed', {
+        index,
+        wallet: operation.sellerPublicKey,
+        tokenAmount: operation.tokenAmount
+      });
+      return { index, success: true, data: result };
+    } catch (error) {
+      logger.error('Sell operation failed', {
+        index,
+        wallet: operation.sellerPublicKey,
+        error: error.message,
+        code: error.code
+      });
+      return { index, success: false, error: error.message };
+    }
   }
 }
 
