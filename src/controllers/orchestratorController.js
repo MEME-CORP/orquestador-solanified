@@ -1124,7 +1124,7 @@ class OrchestratorController {
           buyerPublicKey: wallet.public_key,
           mintAddress: contractAddress,
           solAmount: wallet.availableForBuy, // Use calculated available amount from database
-          slippageBps: Math.round(slippage * 100),
+          slippageBps: Math.round(slippageNum * 100),
           priorityFeeSol: priority_fee || 0.000005,
           privateKey: wallet.private_key,
           commitment: 'confirmed'
@@ -2012,10 +2012,36 @@ class OrchestratorController {
                 walletService.getSolBalance(distributorPublicKey)
               ]);
 
+              let updatedDevSplBalance = Number(user.dev_balance_spl ?? 0);
+              if (token?.contract_address) {
+                try {
+                  const devSplBalanceData = await walletService.getSplBalance(
+                    token.contract_address,
+                    user.dev_public_key,
+                    { maxRetries: 3, logProgress: true }
+                  );
+                  updatedDevSplBalance = Number(devSplBalanceData.uiAmount ?? devSplBalanceData.balance ?? updatedDevSplBalance);
+
+                  logger.info('Dev SPL balance refreshed after 100% sell cleanup', {
+                    requestId,
+                    dev_public_key: user.dev_public_key,
+                    mintAddress: token.contract_address,
+                    refreshedSplBalance: updatedDevSplBalance
+                  });
+                } catch (splRefreshError) {
+                  logger.warn('Unable to refresh Dev SPL balance after 100% sell cleanup', {
+                    requestId,
+                    dev_public_key: user.dev_public_key,
+                    mintAddress: token.contract_address,
+                    error: splRefreshError.message
+                  });
+                }
+              }
+
               await userModel.updateDevBalances(
                 user_wallet_id,
                 Math.max(updatedDevBalance.balanceSol, MINIMUM_RESERVE),
-                Number(user.dev_balance_spl ?? 0)
+                updatedDevSplBalance
               );
 
               await userModel.updateDistributorBalances(
@@ -2634,7 +2660,7 @@ class OrchestratorController {
     const requestId = uuidv4();
 
     try {
-      const { user_wallet_id } = req.body;
+      const { user_wallet_id, mint_address } = req.body;
 
       logger.info('🚀 [VERIFY_DEV_WALLET_BALANCE] Request started', {
         requestId,
@@ -2662,7 +2688,7 @@ class OrchestratorController {
       }
 
       const previousBalance = Number(user?.dev_balance_sol ?? 0);
-      const currentSplBalance = Number(user?.dev_balance_spl ?? 0);
+      const previousSplBalance = Number(user?.dev_balance_spl ?? 0);
 
       logger.info('🔗 [VERIFY_DEV_WALLET_BALANCE] Fetching on-chain SOL balance for dev wallet', {
         requestId,
@@ -2688,10 +2714,55 @@ class OrchestratorController {
         balance_check_time_ms: balanceCheckTime
       });
 
+      let splBalanceSource = 'database';
+      let selectedMintAddress = mint_address;
+      if (!selectedMintAddress) {
+        const latestToken = await tokenModel.getLatestTokenByUser(user_wallet_id);
+        selectedMintAddress = latestToken?.contract_address || null;
+      }
+
+      let currentSplBalance = previousSplBalance;
+      if (selectedMintAddress) {
+        try {
+          const splBalanceData = await walletService.getSplBalance(
+            selectedMintAddress,
+            devPublicKey,
+            { maxRetries: 3, logProgress: true }
+          );
+
+          currentSplBalance = Number(splBalanceData.uiAmount ?? splBalanceData.balance ?? previousSplBalance);
+          splBalanceSource = 'blockchain_api';
+
+          logger.info('✅ [VERIFY_DEV_WALLET_BALANCE] SPL balance retrieved', {
+            requestId,
+            user_wallet_id,
+            dev_public_key: devPublicKey,
+            mintAddress: selectedMintAddress,
+            spl_balance: currentSplBalance
+          });
+        } catch (splError) {
+          logger.warn('⚠️ [VERIFY_DEV_WALLET_BALANCE] Unable to refresh SPL balance from blockchain API', {
+            requestId,
+            user_wallet_id,
+            dev_public_key: devPublicKey,
+            mintAddress: selectedMintAddress,
+            error: splError.message
+          });
+        }
+      } else {
+        logger.info('ℹ️ [VERIFY_DEV_WALLET_BALANCE] No mint address provided/found, keeping stored SPL balance', {
+          requestId,
+          user_wallet_id,
+          dev_public_key: devPublicKey
+        });
+      }
+
       await userModel.updateDevBalances(user_wallet_id, currentBalance, currentSplBalance);
 
       const balanceDifference = currentBalance - previousBalance;
       const balanceUpdated = Math.abs(balanceDifference) > 0.000001;
+      const splBalanceDifference = currentSplBalance - previousSplBalance;
+      const splBalanceUpdated = Math.abs(splBalanceDifference) > 0.000001;
       const totalTime = Date.now() - startTime;
 
       const response = {
@@ -2700,7 +2771,13 @@ class OrchestratorController {
         previous_balance_sol: previousBalance.toString(),
         current_balance_sol: currentBalance.toString(),
         balance_difference_sol: balanceDifference,
+        previous_balance_spl: previousSplBalance,
+        current_balance_spl: currentSplBalance,
+        balance_difference_spl: splBalanceDifference,
+        spl_balance_source: splBalanceSource,
+        mint_address: selectedMintAddress,
         balance_updated: balanceUpdated,
+        spl_balance_updated: splBalanceUpdated,
         verification_time_ms: totalTime
       };
 
@@ -2710,6 +2787,7 @@ class OrchestratorController {
         dev_public_key: devPublicKey,
         total_time_ms: totalTime,
         balance_updated: balanceUpdated,
+        spl_balance_updated: splBalanceUpdated,
         response
       });
 
